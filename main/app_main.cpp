@@ -4,7 +4,9 @@
 // about ESP-IDF and is therefore testable on a laptop. What is left here is the
 // part that genuinely needs hardware: a UART, a GPIO, a clock and a console.
 
+#include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "driver/gpio.h"
@@ -77,8 +79,9 @@ void configure_meter_link() {
 
     // A TX ring buffer, and no RX buffer at all: the simulator never receives on
     // the meter link, and the real meter never listens either (FR-LNK-03).
-    ESP_ERROR_CHECK(uart_driver_install(METER_UART, UART_HW_FIFO_LEN(METER_UART) + 16, 1024, 0,
-                                        nullptr, 0));
+    // The RX size is a floor the driver insists on (it must exceed the hardware
+    // FIFO), not a buffer this firmware has any use for.
+    ESP_ERROR_CHECK(uart_driver_install(METER_UART, 256, 1024, 0, nullptr, 0));
     ESP_ERROR_CHECK(uart_param_config(METER_UART, &cfg));
     ESP_ERROR_CHECK(uart_set_pin(METER_UART, TX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
                                  UART_PIN_NO_CHANGE));
@@ -248,9 +251,12 @@ int cmd_set(int argc, char **argv) {
 int cmd_status(int, char **) {
     Lock held;
     const e450::DateTime now = g_clock.now();
+    // PRIu32 rather than %u: uint32_t is `long unsigned int` on Xtensa, and
+    // -Werror=format catches the mismatch that would be silent on the host.
     std::printf(
-        "OK pi=%u po=%u pf=%.2f%s ei=%u eo=%u q1=%u q2=%u q3=%u q4=%u i=%u "
-        "time=%04u-%02u-%02uT%02u:%02u:%02u paused=%d dut=%d telegrams=%u\n",
+        "OK pi=%" PRIu32 " po=%" PRIu32 " pf=%.2f%s ei=%" PRIu32 " eo=%" PRIu32 " q1=%" PRIu32
+        " q2=%" PRIu32 " q3=%" PRIu32 " q4=%" PRIu32 " i=%" PRIu32
+        " time=%04u-%02u-%02uT%02u:%02u:%02u paused=%d dut=%d telegrams=%" PRIu32 "\n",
         g_model.import_w(), g_model.export_w(), static_cast<double>(g_model.power_factor()),
         g_model.lagging() ? "" : "L", g_model.import_wh(), g_model.export_wh(),
         g_model.reactive_varh(e450::ValueModel::Q1_IMPORT_LAGGING),
@@ -302,20 +308,33 @@ int cmd_dut(int argc, char **argv) {
     return 0;
 }
 
+struct CommandDef {
+    const char *command;
+    const char *help;
+    esp_console_cmd_func_t func;
+};
+
 void register_commands() {
-    const esp_console_cmd_t commands[] = {
-        {"set", "set pi|po <W> | pf <0..1> [leading] | time <YYYY-MM-DDTHH:MM:SS>", nullptr,
-         &cmd_set, nullptr},
-        {"status", "print the whole model state as one key=value line", nullptr, &cmd_status,
-         nullptr},
-        {"burst", "emit one telegram now, without disturbing the schedule", nullptr, &cmd_burst,
-         nullptr},
-        {"pause", "stop emitting and stop integrating", nullptr, &cmd_pause, nullptr},
-        {"resume", "resume emitting", nullptr, &cmd_resume, nullptr},
-        {"dut", "dut on|off - switch the 5 V rail the device under test runs on", nullptr, &cmd_dut,
-         nullptr},
+    static constexpr CommandDef DEFS[] = {
+        {"set", "set pi|po <W> | pf <0..1> [leading] | time <YYYY-MM-DDTHH:MM:SS>", &cmd_set},
+        {"status", "print the whole model state as one key=value line", &cmd_status},
+        {"burst", "emit one telegram now, without disturbing the schedule", &cmd_burst},
+        {"pause", "stop emitting and stop integrating", &cmd_pause},
+        {"resume", "resume emitting", &cmd_resume},
+        {"dut", "dut on|off - switch the 5 V rail the device under test runs on", &cmd_dut},
     };
-    for (const esp_console_cmd_t &cmd : commands) ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+
+    // Zero-initialise and assign rather than brace-initialise: esp_console_cmd_t
+    // has grown fields (func_w_context, context) and would grow again, and
+    // -Werror=missing-field-initializers turns every such addition into a build
+    // break for every caller that spelled the struct out positionally.
+    for (const CommandDef &def : DEFS) {
+        esp_console_cmd_t cmd = {};
+        cmd.command = def.command;
+        cmd.help = def.help;
+        cmd.func = def.func;
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
 }
 
 e450::DateTime parse_epoch() {
