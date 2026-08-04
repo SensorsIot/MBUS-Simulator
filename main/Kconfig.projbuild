@@ -1,0 +1,39 @@
+menu "MBUS Simulator"
+
+config SIM_MBUS_TX_GPIO
+    int "Meter-link UART2 TX GPIO"
+    default 17
+    help
+        GPIO17 is U2TXD's default routing on the classic ESP32, so UART2 needs
+        no pin-matrix detour. FSD §2.1.
+
+config SIM_TX_INVERT
+    bool "Invert the meter-link TX signal"
+    default y
+    help
+        The external driver stage is inverting, so the UART must invert too:
+        UART idle then drives the pin low, which puts the bus at 24 V — the
+        M-Bus mark state. Turn this off only for a non-inverting driver.
+        FSD FR-LNK-02.
+
+config SIM_DUT_POWER_GPIO
+    int "DUT 5 V enable GPIO"
+    default 16
+    help
+        Switches the 5 V rail the device under test runs on, so `dut off` can
+        power-cycle it. Set to -1 if the rig wires 5 V permanently — the
+        commands then report ERR rather than pretending to work. FSD FR-PWR-02.
+
+config SIM_DUT_POWER_ACTIVE_HIGH
+    bool "DUT power enable is active high"
+    default y
+
+config SIM_EPOCH
+    string "Synthetic clock epoch"
+    default "2026-01-01T00:00:00"
+    help
+        The clock the device holds at boot. There is no RTC and no time source,
+        by design: determinism is worth more here than truth, because output
+        that changes run to run cannot be compared. FSD FR-CLK-01.
+
+endmenu

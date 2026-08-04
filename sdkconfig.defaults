@@ -1,0 +1,22 @@
+# Applied by CI and by any local build. Anything here is a decision; anything
+# absent is ESP-IDF's default and stays that way.
+
+# 1 kHz tick, so the scheduler's 50 ms poll resolves properly and a 5 s clock
+# boundary is never straddled.
+CONFIG_FREERTOS_HZ=1000
+
+# The console is the simulator's entire public API (FSD §8), so it gets line
+# editing and history rather than a bare getchar loop.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_CONSOLE_SORTED_HELP=y
+
+# Nothing in this firmware throws or uses RTTI. Off, because the alternative is
+# tens of kilobytes of image for a feature the code does not use.
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+
+# The telegram encoder builds its output in std::vector, so the heap sees a few
+# hundred bytes of churn every 5 s. Poisoning catches an overrun at the moment
+# it happens rather than as a mysterious reboot later; it costs a little RAM and
+# this device has no other use for it.
+CONFIG_HEAP_POISONING_LIGHT=y
