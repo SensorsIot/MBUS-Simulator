@@ -47,8 +47,11 @@ constexpr uart_port_t METER_UART = UART_NUM_2;
 constexpr auto TX_GPIO = static_cast<gpio_num_t>(CONFIG_SIM_MBUS_TX_GPIO);
 constexpr int DUT_POWER_GPIO = CONFIG_SIM_DUT_POWER_GPIO;
 
-// FR-SCH-01: emit when the clock's seconds field is divisible by 5.
-constexpr int PUSH_PERIOD_SECONDS = 5;
+// FR-SCH-01: emit when the clock's seconds field is divisible by the period.
+constexpr int PUSH_PERIOD_SECONDS = CONFIG_SIM_PUSH_PERIOD_SECONDS;
+static_assert(60 % PUSH_PERIOD_SECONDS == 0,
+              "SIM_PUSH_PERIOD_SECONDS must divide 60, or emission is uneven "
+              "across the minute boundary (FR-SCH-01)");
 
 // How often the scheduler task wakes to re-read the wall clock. Fine enough that
 // a 5 s boundary is never missed, coarse enough to cost nothing.
@@ -172,9 +175,30 @@ void transmit_telegram() {
 
     // Logged on the console so "is it emitting?" is answerable without a scope.
     // That is the first cut of any no-signal investigation: this line appearing
-    // every 5 s puts the fault after the pin, its absence puts it before.
-    ESP_LOGI(TAG, "telegram %" PRIu32 ": %u bytes on GPIO%d", invoke_id,
-             static_cast<unsigned>(wire.size()), CONFIG_SIM_MBUS_TX_GPIO);
+    // every period puts the fault after the pin, its absence puts it before.
+    //
+    // The silence figure is here rather than only at boot because it is the one
+    // number that decides whether the reader sees two telegrams or one merged
+    // burst (FR-SCH-08), and it moves whenever the telegram does.
+    const int32_t silence = e450::silence_ms(wire.size(), PUSH_PERIOD_SECONDS * 1000);
+    ESP_LOGI(TAG, "telegram %" PRIu32 ": %u bytes on GPIO%d, %" PRIu32 " ms on the wire, "
+                  "%" PRId32 " ms silent",
+             invoke_id, static_cast<unsigned>(wire.size()), CONFIG_SIM_MBUS_TX_GPIO,
+             e450::wire_time_ms(wire.size()), silence);
+
+    // FR-SCH-08. Loud, and only once: a periodic error line would bury the
+    // telegram log it is trying to qualify, but a silent one lets the rig go on
+    // producing bursts the reader merges — which looks like a decode fault at
+    // the far end and gets debugged there, wrongly.
+    static bool complained = false;
+    if (silence < e450::MIN_SILENCE_MS && !complained) {
+        complained = true;
+        ESP_LOGE(TAG,
+                 "only %" PRId32 " ms of silence between telegrams, want >= %" PRId32 " ms: "
+                 "the reader ends a transmission after %" PRId32 " ms of quiet, so consecutive "
+                 "telegrams may be read as one. Raise SIM_PUSH_PERIOD_SECONDS.",
+                 silence, e450::MIN_SILENCE_MS, e450::DUT_BURST_TIMEOUT_MS);
+    }
 }
 
 [[noreturn]] void scheduler_task(void *) {
@@ -298,7 +322,7 @@ int cmd_status(int, char **) {
     std::printf(
         "OK pi=%" PRIu32 " po=%" PRIu32 " pf=%.2f%s ei=%" PRIu32 " eo=%" PRIu32 " q1=%" PRIu32
         " q2=%" PRIu32 " q3=%" PRIu32 " q4=%" PRIu32 " i=%" PRIu32
-        " time=%04u-%02u-%02uT%02u:%02u:%02u paused=%d dut=%d telegrams=%" PRIu32 "\n",
+        " time=%04u-%02u-%02uT%02u:%02u:%02u paused=%d dut=%d period=%d telegrams=%" PRIu32 "\n",
         g_model.import_w(), g_model.export_w(), static_cast<double>(g_model.power_factor()),
         g_model.lagging() ? "" : "L", g_model.import_wh(), g_model.export_wh(),
         g_model.reactive_varh(e450::ValueModel::Q1_IMPORT_LAGGING),
@@ -306,7 +330,7 @@ int cmd_status(int, char **) {
         g_model.reactive_varh(e450::ValueModel::Q3_EXPORT_LEADING),
         g_model.reactive_varh(e450::ValueModel::Q4_IMPORT_LEADING), g_model.current_ma(), now.year,
         now.month, now.day, now.hour, now.minute, now.second, g_paused ? 1 : 0,
-        g_dut_powered ? 1 : 0, g_telegrams);
+        g_dut_powered ? 1 : 0, PUSH_PERIOD_SECONDS, g_telegrams);
     return 0;
 }
 

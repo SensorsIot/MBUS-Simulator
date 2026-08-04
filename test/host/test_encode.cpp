@@ -15,6 +15,7 @@
 #include <e450/telegram.h>
 #include <e450/value_model.h>
 
+#include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -301,6 +302,47 @@ void case_determinism() {
     check(first == second, "same state, same bytes");
 }
 
+// FR-SCH-08 — the telegram must leave the reader a silent gap long enough to
+// call the transmission finished.
+//
+// This is a host test because the arithmetic is fully determined here: the CI1
+// list is fixed and every value is a fixed-width encoding, so the telegram is
+// the same size whatever the model holds. If it ever stops fitting — a longer
+// object list, a second push setup, a wider value — the failure is a merged
+// burst at the far end, which presents as a decode fault in the *reader* and
+// gets debugged there. Catching it in ctest costs seconds instead.
+void case_silence() {
+    e450::ValueModel model;
+    e450::DateTime when;
+    when.year = 2026;
+    when.month = 8;
+    when.day = 4;
+    when.hour = 17;
+    when.minute = 0;
+    when.second = 5;
+
+    // Worst case for size is not the empty model: exercise values that occupy
+    // every byte of their fixed-width encodings.
+    model.set_import_w(0xFFFFFFFF);
+    model.set_export_w(0xFFFFFFFF);
+    model.tick(3600u * 1000u);
+
+    const std::vector<uint8_t> wire =
+        e450::encode_telegram(make_spec(e450::ebl::ci1_values(model), 0xFFFFFFFF, when));
+
+    const uint32_t period_ms = 5000;
+    const int32_t silence = e450::silence_ms(wire.size(), period_ms);
+    std::printf("  %zu bytes, %" PRIu32 " ms on the wire, %" PRId32 " ms silent in %u ms\n",
+                wire.size(), e450::wire_time_ms(wire.size()), silence, period_ms);
+
+    check(silence >= e450::MIN_SILENCE_MS, "5 s period leaves the 3 s target gap");
+    check(silence >= e450::DUT_BURST_TIMEOUT_MS, "5 s period clears the reader's 2 s timeout");
+
+    // The rounding must be conservative, or a telegram that just misses passes.
+    check(e450::wire_time_ms(1) == 5, "one byte is 11 bits = 4.58 ms, rounded up");
+    check(e450::wire_time_ms(0) == 0, "no bytes, no time");
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -321,6 +363,7 @@ int main(int argc, char **argv) {
     else if (name == "reactive") case_reactive();
     else if (name == "monotonic") case_monotonic();
     else if (name == "determinism") case_determinism();
+    else if (name == "silence") case_silence();
     else {
         std::fprintf(stderr, "unknown case: %s\n", name.c_str());
         return 2;

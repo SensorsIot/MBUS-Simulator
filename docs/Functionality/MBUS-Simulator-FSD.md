@@ -6,7 +6,7 @@
 | **Target** | ESP32 (classic, Xtensa), ESP-IDF v6.0.2 |
 | **Peer under test** | [`gplug-mini`](https://github.com/SensorsIot/gplug-mini) — ESP32-C3 M-Bus/DLMS reader |
 | **Complexity** | Low–Medium — one protocol, one output pin, no network |
-| **Provenance legend** | `[user]` decided in the design interview · `[derived]` follows from another requirement · `[capture]` measured from a real E450 telegram · `[doc:EBL]` EBL Liestal parametrisation · `[doc:LG]` Landis+Gyr *Standard CIP-Liste*, 16 Sep 2024 |
+| **Provenance legend** | `[user]` decided in the design interview · `[derived]` follows from another requirement · `[capture]` measured from a real E450 telegram · `[doc:EBL]` EBL Liestal parametrisation · `[doc:LG]` Landis+Gyr *Standard CIP-Liste*, 16 Sep 2024 · `[doc:DUT]` the reader's stated line and framing expectations · `[measured]` established on the bench, against the behaviour it describes |
 
 > **Plane note.** This project deliberately carries the **WHAT plane only** — no
 > Harness and no UserDocumentation. It is a bench instrument with no end user and
@@ -224,19 +224,38 @@ schedules; **v1 implements Consumer Information 1 (the 5 s list) only** `[user]`
 
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
-| **FR-SCH-01** | Must | The scheduler shall emit one telegram whenever the synthetic clock's seconds field is divisible by 5. | `[doc:LG]` §3.1 |
+| **FR-SCH-01** | Must | The scheduler shall emit one telegram whenever the synthetic clock's seconds field is divisible by the push period, which shall default to **5 s** and shall divide 60. | `[doc:LG]` §3.1 |
 | **FR-SCH-02** | Must | The telegram shall carry the 13 objects of Appendix A, in the listed order. | `[doc:EBL]` |
 | **FR-SCH-03** | Must | The scheduler shall integrate the value model (FR-MDL-05) once per emission, using the elapsed time since the previous emission. | `[derived]` |
 | **FR-SCH-04** | Must | Emission shall be suppressed while paused, and integration shall be suppressed with it. | `[derived]` |
 | **FR-SCH-05** | Must | An emission forced by `burst` shall not disturb the periodic schedule. | `[user]` |
 | **FR-SCH-06** | Must | If a telegram is still transmitting when the next tick falls due, the scheduler shall queue the new telegram and transmit it on completion, never interleaving two telegrams on the line. | `[derived]` |
 | **FR-SCH-07** | Should | The architecture shall admit additional push setups with independent object lists and schedules without altering §7. | `[user]` |
+| **FR-SCH-08** | Must | Between the last byte of one telegram and the first byte of the next the line shall be silent for at least **3000 ms**, and never less than the 2000 ms in which the DUT declares a transmission ended. | `[doc:DUT]` |
 
-> **On FR-SCH-06.** The 13-object list is ≈320 bytes of APDU, ≈356 bytes on the
-> wire, **≈1.6 s at 218 byte/s** — comfortably inside 5 s. The requirement exists
-> because the design must not *depend* on that: the moment a second push list is
-> enabled, transmissions collide, and a real meter serialises them into what the
-> DUT sees as one merged burst. `[derived]`
+> **On FR-SCH-06.** The 13-object list is 381 bytes on the wire, **1747 ms at
+> 218 byte/s** — inside 5 s. The requirement exists because the design must not
+> *depend* on that: the moment a second push list is enabled, transmissions
+> collide, and a real meter serialises them into what the DUT sees as one merged
+> burst. `[derived]`
+
+> **On FR-SCH-08 — why the gap is a requirement and not a consequence.** The
+> reader does not delimit transmissions by counting frames; it decodes when the
+> line has been quiet for 2000 ms. So the silence is load-bearing, and it is
+> whatever the period has left over after the telegram — which makes it a
+> property of the *telegram size*, a number nobody chose deliberately. At a 5 s
+> period the budget is **436 bytes** for the 3000 ms target and **654 bytes**
+> before the reader starts merging cycles; the CI1 list uses 381. That is 55
+> bytes of headroom, and FR-SCH-07's additional push setups would spend it at
+> once.
+>
+> Two guards, because the failure is silent and lands at the far end. The host
+> test computes the gap from the encoded telegram and fails the build if it
+> drops below either threshold, which is possible because every value is a
+> fixed-width encoding and the telegram is 381 bytes whatever the model holds.
+> The firmware logs the gap on every telegram and raises one `E`-level line if
+> it is short. Without those, a telegram that grew past the budget would present
+> as a decode fault in the reader and be debugged there. `[derived]`
 
 ### 6.3 Verification contracts
 
@@ -246,6 +265,8 @@ schedules; **v1 implements Consumer Information 1 (the 5 s list) only** `[user]`
 | FR-SCH-03 | `set pi 3600`; exactly 2 ticks | `1.8.0` advanced by 10 Wh | Advance of 5 or 20 Wh (single/double counting) | host |
 | FR-SCH-05 | `burst` at second 02 | Extra telegram at 02; next scheduled at 05 | Schedule shifted to 07 | target |
 | FR-SCH-06 | Force two emissions 100 ms apart | Second follows the first intact | Bytes of the two interleaved | target |
+| FR-SCH-08 | Encode the CI1 telegram; compute the gap at a 5 s period | ≥ 3000 ms silent | Any gap under 2000 ms; a size that varies with model state | host |
+| FR-SCH-08 | Run ≥ 6 consecutive cycles against the DUT | Each cycle decoded separately, same object count every time | Two cycles merged into one; a cycle byte count above one telegram's | bench |
 
 ---
 

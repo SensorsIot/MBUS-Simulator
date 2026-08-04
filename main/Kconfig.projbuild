@@ -22,6 +22,21 @@ config SIM_TX_INVERT
         byte a one-inversion mismatch produces (see FR-LNK-02). Turn it back on
         only for a driver stage that inverts. FSD FR-LNK-02.
 
+config SIM_PUSH_PERIOD_SECONDS
+    int "Seconds between telegrams"
+    default 5
+    range 5 60
+    help
+        The E450's Consumer Information 1 list is pushed every 5 s, which is the
+        cadence this simulator exists to reproduce, so 5 is the default and the
+        faithful value. Raise it only for a rig that wants a wider silent gap
+        between transmissions than 5 s leaves.
+
+        Must divide 60: FR-SCH-01 aligns emission to the wall clock's seconds
+        field, so a period that does not divide 60 emits unevenly across the
+        minute boundary. app_main refuses to run with one that does not, rather
+        than emitting a schedule nobody asked for. FSD FR-SCH-01/08.
+
 config SIM_DUT_POWER_GPIO
     int "DUT 5 V enable GPIO"
     default 16
