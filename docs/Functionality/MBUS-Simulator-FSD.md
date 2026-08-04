@@ -57,11 +57,11 @@ accuracy, no metrological claim, and no relationship to any real installation.
 ```
 console CLI ──► value model ──► push scheduler ──► telegram encoder ──► UART2
  (set pi …)     P, E, I, Q       every 5 s          DataNotification      2400 8E1
-                                                    → GBT → HDLC          TX inverted
+                                                    → GBT → HDLC          TX not inverted
                                                                           GPIO17
                                                                              │
                                               12/24 V M-Bus driver ◄─────────┘
-                                                      │        (inverting)
+                                                      │     (non-inverting)
                                                       ▼
                                        gPlug GPIO7 ──► dlms_parser v2.1.0
                                        + 5 V supply, Data Request
@@ -79,7 +79,7 @@ console CLI ──► value model ──► push scheduler ──► telegram en
 | Meter-link UART | **UART2**, TX **GPIO17** (U2TXD default routing) | `[user]` |
 | Console UART | UART0 (GPIO1/GPIO3), 115200 8N1 | `[derived]` |
 | Line parameters | 2400 baud, 8 data bits, **even** parity, 1 stop bit | `[doc:LG]` §3.1 |
-| Driver stage | External, **inverting**, logic → 12/24 V M-Bus levels | `[user]` |
+| Driver stage | External, **non-inverting**, logic → 12/24 V M-Bus levels | `[user]`, `[measured]` |
 | DUT supply | Rig provides 5 V + GND + Data Request on the RJ45, switchable | `[user]` |
 
 The gPlug has no independent supply — it is powered from the meter's 5 V rail
@@ -120,7 +120,8 @@ values equal the model. No ESP32 involved. **Exit:** `ctest` green in CI.
 
 ### 3.2 Phase 2 — Bytes on the wire
 
-Firmware on the ESP32, UART2 configured and inverted, console live. **Exit:** a
+Firmware on the ESP32, UART2 configured at the polarity FR-LNK-02 fixes, console
+live. **Exit:** `tx 10` reads back as `0x55` at the far end (FR-CLI-07), and a
 logic analyser or a second ESP32 receives the same bytes the host test produced,
 with no framing or parity errors.
 
@@ -310,11 +311,19 @@ on. `[user]`
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
 | **FR-CLI-01** | Must | The device shall expose a line-based console on UART0 at 115200 8N1. | `[user]` |
-| **FR-CLI-02** | Must | The console shall implement: `set pi <W>`, `set po <W>`, `set pf <0.00-1.00>`, `set time <ISO-8601>`, `status`, `burst`, `pause`, `resume`, `dut on`, `dut off`, `help`. | `[user]` |
+| **FR-CLI-02** | Must | The console shall implement: `set pi <W>`, `set po <W>`, `set pf <0.00-1.00>`, `set time <ISO-8601>`, `status`, `burst`, `pause`, `resume`, `dut on`, `dut off`, `tx [seconds]`, `help`. | `[user]` |
 | **FR-CLI-03** | Must | Every command shall reply on one line, beginning `OK` or `ERR `, before any further output. | `[derived]` |
 | **FR-CLI-04** | Must | `status` shall print the complete model state — both powers, power factor, all accumulators in Wh, clock, paused flag, DUT power state, telegram count — as one `key=value` line. | `[derived]` |
 | **FR-CLI-05** | Must | A malformed or out-of-range argument shall leave the model unchanged and reply `ERR`. | `[derived]` |
 | **FR-CLI-06** | Must | Console output shall never be written to UART2. | `[derived]` |
+| **FR-CLI-07** | Must | `tx [seconds]` shall emit `0x55` continuously on the meter link for 1–30 s (default 5), suppressing the scheduler for the duration so nothing else reaches the line, and shall reply with the byte count and GPIO. | `[user]` |
+
+> **Why a requirement for a test pattern.** `0x55` alternates every bit, so it
+> separates the line settings from everything layered on top: no framing, no
+> checksums and no content have to be right for it to mean something. What the
+> reader logs back names the fault — `0x55` clean, `0xD5` one inversion out
+> (FR-LNK-02), varying bytes a wrong rate. It is the first thing to reach for
+> when a reader decodes nothing, and it is how FR-LNK-02 was settled.
 
 ### 8.3 Verification contracts
 
@@ -323,6 +332,7 @@ on. `[user]`
 | FR-CLI-03/04 | `set pi 1500` then `status` | `OK` then one line containing `pi=1500` | Multi-line or unparsable status | bench |
 | FR-CLI-05 | `set pi -5`, then `status` | `ERR`; `pi` unchanged | Negative or wrapped power accepted | bench |
 | FR-CLI-06 | Issue 100 commands while monitoring UART2 | Only telegram bytes on UART2 | Any console character on the meter link | target |
+| FR-CLI-07 | `tx 10` with a reader capturing the meter link | `OK 2180 bytes…`; every byte received is `0x55` | Any telegram byte interleaved into the pattern | bench |
 
 ---
 
@@ -335,21 +345,31 @@ on. `[user]`
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
 | **FR-LNK-01** | Must | The device shall transmit on UART2, TX on a configurable GPIO defaulting to **17**, at 2400 baud, 8 data bits, even parity, 1 stop bit. | `[doc:LG]` §3.1 |
-| **FR-LNK-02** | Must | The TX signal shall be inverted in the UART peripheral (`UART_SIGNAL_TXD_INV`). | `[user]` |
+| **FR-LNK-02** | Must | The TX signal shall **not** be inverted in the UART peripheral: the signal the simulator puts on the bus is not inverted. | `[user]`, `[measured]` |
 | **FR-LNK-03** | Must | The device shall never enable a receiver on UART2. | `[derived]` |
 | **FR-LNK-04** | Must | Between telegrams the line shall rest in the mark state, presenting 24 V on the bus. | `[derived]` |
 | **FR-LNK-05** | Must | The TX GPIO shall be driven to the mark-producing level before UART initialisation and within 10 ms of reset. | `[derived]` |
 
-> **FR-LNK-05 is the one that bites.** With an inverting driver, UART idle drives
-> the TX pin **low** to put 24 V (mark) on the bus. From reset until `app_main`
-> configures it, that pin is a floating input and the bus level is undefined — so
-> without this, every simulator reboot may present the DUT with a break condition
-> or noise.
+> **FR-LNK-05 is the one that bites.** UART idle must already be on the pin
+> before the peripheral takes it over — **high** with FR-LNK-02 as written, low if
+> inversion is ever turned back on. From reset until `app_main` configures it,
+> that pin is a floating input and the bus level is undefined, so without this
+> every simulator reboot may present the DUT with a break condition or noise.
+
+> **How FR-LNK-02 was settled.** It was originally written the other way round,
+> from a description of the driver stage as inverting, and never measured. The
+> `tx` command (FR-CLI-07) then sent a continuous `0x55` and the reader logged a
+> uniform `0xD5` across all 520 bytes received. That byte is not a symptom of a
+> wrong rate, which produces varying bytes: inverting a `0x55` 8E1 frame moves
+> the receiver's start-bit edge one bit late, so it samples `1 0 1 0 1 0 1 1` —
+> `0xD5` — and flags a parity error, every frame, identically. One inversion too
+> many, and the user confirmed the simulator's output is not inverted.
 
 ### 9.2 Verification contracts
 
 | ID | Precondition · stimulus | Expected | **Prohibited** | Tier |
 |---|---|---|---|---|
+| FR-LNK-01/02 | `tx 10` (FR-CLI-07) with a 2400 8E1 reader on the bus | Every byte received is `0x55` | `0xD5` (one inversion out); varying bytes (wrong rate); no bytes | bench |
 | FR-LNK-01/02 | Capture one telegram with a logic analyser at the driver input | Byte stream identical to the host test's output; 2400 8E1 decode clean | Any parity or framing error | target |
 | FR-LNK-04 | Idle simulator; DVM on the bus | 24 V | 12 V (continuous space) | target |
 | FR-LNK-05 | Scope the bus across a simulator reset, 20 resets | Bus at 24 V within 10 ms, no spurious edges | Any spurious start bit at boot | target |

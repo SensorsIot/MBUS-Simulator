@@ -62,6 +62,9 @@ SemaphoreHandle_t g_lock = nullptr;
 // one thing FR-SCH-06 forbids.
 SemaphoreHandle_t g_tx_lock = nullptr;
 bool g_paused = false;
+// FR-CLI-07. Distinct from g_paused: `tx` must not disturb the pause state the
+// operator set, and must restore exactly what it found.
+bool g_tx_pattern = false;
 bool g_dut_powered = true;
 bool g_burst_requested = false;
 uint32_t g_invoke_id = 0;
@@ -75,9 +78,11 @@ struct Lock {
 // ------------------------------------------------------------------ hardware
 
 void configure_meter_link() {
-    // FR-LNK-05, and the one that bites if skipped. With an inverting driver the
-    // UART's idle state drives this pin LOW to put 24 V — the mark state — on
-    // the bus. Between reset and uart_set_pin() the pin is a floating input, so
+    // FR-LNK-05, and the one that bites if skipped. The idle level that puts
+    // 24 V — the mark state — on the bus is HIGH for this rig's non-inverting
+    // driver, and LOW if TX inversion is turned back on for an inverting one;
+    // either way it is the UART's idle level, computed here from the same
+    // constant. Between reset and uart_set_pin() the pin is a floating input, so
     // without driving it here the bus level is undefined on every reboot and the
     // reader sees a break condition or noise instead of a quiet line.
     gpio_config_t idle = {};
@@ -191,7 +196,16 @@ void transmit_telegram() {
             const e450::DateTime now = g_clock.now();
             const bool on_boundary =
                 (now.second % PUSH_PERIOD_SECONDS == 0) && (now.second != last_emitted_second);
-            if (g_burst_requested) {
+            if (g_tx_pattern) {
+                // FR-CLI-07: `tx` owns the line for its whole duration —
+                // otherwise the pattern the operator is measuring has telegram
+                // bytes spliced into it, which is precisely the confusion the
+                // command exists to remove. Consume the boundary without
+                // emitting, so the pattern is not chased by a telegram in the
+                // same second: the reader needs a silent gap to decide that a
+                // transmission ended.
+                if (on_boundary) last_emitted_second = now.second;
+            } else if (g_burst_requested) {
                 // FR-SCH-05: a forced burst must not shift the schedule, so it
                 // deliberately does not touch last_emitted_second.
                 g_burst_requested = false;
@@ -342,11 +356,13 @@ struct CommandDef {
     esp_console_cmd_func_t func;
 };
 
-// Bring-up aid: a continuous 0x55 pattern, which at 2400 8E1 is the densest
-// edge pattern the line can carry. A telegram is 1.6 s of traffic in every 5 s,
-// so a scope without a trigger shows a mostly idle line and looks dead; this
-// gives seconds of unambiguous square wave to probe, and settles FR-LNK-04's
-// polarity question directly.
+// FR-CLI-07. A continuous 0x55 pattern, which at 2400 8E1 is the densest edge
+// pattern the line can carry. Two uses, and the second is the one that earns it
+// a requirement: a scope sees seconds of unambiguous square wave rather than the
+// mostly-idle line a 1.6-s-in-5 telegram looks like, and a reader at the far end
+// reports back what the line settings actually are. Every byte 0x55 means they
+// match; a uniform 0xD5 is one inversion out; varying bytes are a wrong rate.
+// That is how FR-LNK-02 was settled.
 int cmd_tx(int argc, char **argv) {
     long seconds = 5;
     if (argc >= 2) {
@@ -363,12 +379,23 @@ int cmd_tx(int argc, char **argv) {
     uint8_t chunk[64];
     std::memset(chunk, 0x55, sizeof(chunk));
 
+    // Silence the scheduler first and let any telegram already in flight finish,
+    // so the pattern starts on a clean line. g_tx_lock alone would only queue a
+    // telegram behind the pattern; the flag stops one being produced at all.
+    {
+        Lock held;
+        g_tx_pattern = true;
+    }
     xSemaphoreTake(g_tx_lock, portMAX_DELAY);
     for (long sent = 0; sent < total; sent += static_cast<long>(sizeof(chunk))) {
         uart_write_bytes(METER_UART, chunk, sizeof(chunk));
     }
     uart_wait_tx_done(METER_UART, portMAX_DELAY);
     xSemaphoreGive(g_tx_lock);
+    {
+        Lock held;
+        g_tx_pattern = false;
+    }
 
     std::printf("OK %ld bytes of 0x55 on GPIO%d\n", total, CONFIG_SIM_MBUS_TX_GPIO);
     return 0;
@@ -382,7 +409,7 @@ void register_commands() {
         {"pause", "stop emitting and stop integrating", &cmd_pause},
         {"resume", "resume emitting", &cmd_resume},
         {"dut", "dut on|off - switch the 5 V rail the device under test runs on", &cmd_dut},
-        {"tx", "tx [seconds] - emit a continuous 0x55 pattern for scoping the line", &cmd_tx},
+        {"tx", "tx [seconds] - hold the line and emit only 0x55, to check line settings", &cmd_tx},
     };
 
     // Zero-initialise and assign rather than brace-initialise: esp_console_cmd_t

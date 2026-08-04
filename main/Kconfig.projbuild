@@ -13,12 +13,14 @@ config SIM_MBUS_TX_GPIO
 
 config SIM_TX_INVERT
     bool "Invert the meter-link TX signal"
-    default y
+    default n
     help
-        The external driver stage is inverting, so the UART must invert too:
-        UART idle then drives the pin low, which puts the bus at 24 V — the
-        M-Bus mark state. Turn this off only for a non-inverting driver.
-        FSD FR-LNK-02.
+        Off, because the simulator's output signal is not inverted: UART idle
+        drives the pin high, which the driver stage passes through as the 24 V
+        M-Bus mark state. This was measured, not assumed — with inversion on,
+        a continuous 0x55 arrived at the reader as a uniform 0xD5, the exact
+        byte a one-inversion mismatch produces (see FR-LNK-02). Turn it back on
+        only for a driver stage that inverts. FSD FR-LNK-02.
 
 config SIM_DUT_POWER_GPIO
     int "DUT 5 V enable GPIO"
