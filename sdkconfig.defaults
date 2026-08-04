@@ -20,3 +20,9 @@ CONFIG_COMPILER_CXX_RTTI=n
 # it happens rather than as a mysterious reboot later; it costs a little RAM and
 # this device has no other use for it.
 CONFIG_HEAP_POISONING_LIGHT=y
+
+# 4 MB, measured on the board with POST /api/chip/info (ESP32-D0WDQ6 rev v1.0,
+# manufacturer 20 device 4016) — not guessed. ESP-IDF's default for this target
+# is 2 MB, which the build was silently using and writing into the image header,
+# where the bootloader then prints it back as if it were a fact about the chip.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

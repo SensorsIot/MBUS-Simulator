@@ -34,6 +34,11 @@ jobs:
           # idf.py size needs the toolchain, so just report the raw sizes here
           echo "app: $(stat -c%s build/MBUS-Simulator.bin 2>/dev/null || echo '?') bytes"
 
+      # bootloader/ and partition_table/ are named explicitly: build/*.bin does
+      # not descend into them, so without these lines the artefact carries only
+      # the app image and cannot cold-flash a board. That is invisible until
+      # someone tries, because an app-only flash succeeds on a board that
+      # already has a bootloader — and then runs the wrong partition table.
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-esp32
@@ -42,6 +47,9 @@ jobs:
             build/*.elf
             build/*.map
             build/flasher_args.json
+            build/flash_args
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
           if-no-files-found: error
 
   release:
