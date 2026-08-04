@@ -57,6 +57,10 @@ constexpr TickType_t SCHEDULER_POLL_MS = 50;
 e450::ValueModel g_model;
 e450::SimClock g_clock{e450::DateTime{}};
 SemaphoreHandle_t g_lock = nullptr;
+// A second mutex, guarding the UART rather than the model. Without it the `tx`
+// bring-up pattern and a scheduled telegram could interleave on the line — the
+// one thing FR-SCH-06 forbids.
+SemaphoreHandle_t g_tx_lock = nullptr;
 bool g_paused = false;
 bool g_dut_powered = true;
 bool g_burst_requested = false;
@@ -156,8 +160,16 @@ void transmit_telegram() {
     // true by construction: one task owns the line, so two telegrams can never
     // interleave on it. The clock is driven from esp_timer deltas, not from this
     // task's progress, so blocking here costs no time.
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
     uart_write_bytes(METER_UART, wire.data(), wire.size());
     uart_wait_tx_done(METER_UART, portMAX_DELAY);
+    xSemaphoreGive(g_tx_lock);
+
+    // Logged on the console so "is it emitting?" is answerable without a scope.
+    // That is the first cut of any no-signal investigation: this line appearing
+    // every 5 s puts the fault after the pin, its absence puts it before.
+    ESP_LOGI(TAG, "telegram %" PRIu32 ": %u bytes on GPIO%d", invoke_id,
+             static_cast<unsigned>(wire.size()), CONFIG_SIM_MBUS_TX_GPIO);
 }
 
 [[noreturn]] void scheduler_task(void *) {
@@ -330,6 +342,38 @@ struct CommandDef {
     esp_console_cmd_func_t func;
 };
 
+// Bring-up aid: a continuous 0x55 pattern, which at 2400 8E1 is the densest
+// edge pattern the line can carry. A telegram is 1.6 s of traffic in every 5 s,
+// so a scope without a trigger shows a mostly idle line and looks dead; this
+// gives seconds of unambiguous square wave to probe, and settles FR-LNK-04's
+// polarity question directly.
+int cmd_tx(int argc, char **argv) {
+    long seconds = 5;
+    if (argc >= 2) {
+        char *end = nullptr;
+        seconds = std::strtol(argv[1], &end, 10);
+        if (end == argv[1] || *end != 0 || seconds < 1 || seconds > 30) {
+            std::printf("ERR usage: tx [1..30 seconds]\n");
+            return 1;
+        }
+    }
+
+    // 2400 baud, 11 bits per character: 218 characters per second.
+    const long total = seconds * 218;
+    uint8_t chunk[64];
+    std::memset(chunk, 0x55, sizeof(chunk));
+
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    for (long sent = 0; sent < total; sent += static_cast<long>(sizeof(chunk))) {
+        uart_write_bytes(METER_UART, chunk, sizeof(chunk));
+    }
+    uart_wait_tx_done(METER_UART, portMAX_DELAY);
+    xSemaphoreGive(g_tx_lock);
+
+    std::printf("OK %ld bytes of 0x55 on GPIO%d\n", total, CONFIG_SIM_MBUS_TX_GPIO);
+    return 0;
+}
+
 void register_commands() {
     static constexpr CommandDef DEFS[] = {
         {"set", "set pi|po <W> | pf <0..1> [leading] | time <YYYY-MM-DDTHH:MM:SS>", &cmd_set},
@@ -338,6 +382,7 @@ void register_commands() {
         {"pause", "stop emitting and stop integrating", &cmd_pause},
         {"resume", "resume emitting", &cmd_resume},
         {"dut", "dut on|off - switch the 5 V rail the device under test runs on", &cmd_dut},
+        {"tx", "tx [seconds] - emit a continuous 0x55 pattern for scoping the line", &cmd_tx},
     };
 
     // Zero-initialise and assign rather than brace-initialise: esp_console_cmd_t
@@ -374,6 +419,7 @@ e450::DateTime parse_epoch() {
 
 extern "C" void app_main() {
     g_lock = xSemaphoreCreateMutex();
+    g_tx_lock = xSemaphoreCreateMutex();
     g_clock.set(parse_epoch());
 
     configure_meter_link();

@@ -12,7 +12,7 @@ power, so you can set a load and check what the device under test reports.
 console CLI ──► value model ──► push scheduler ──► telegram encoder ──► UART2
  (set pi …)     P, E, I, Q       every 5 s          DataNotification      2400 8E1
                                                     → GBT → HDLC          TX inverted
-                                                                          GPIO18
+                                                                          GPIO17
                                                                              │
                                               12/24 V M-Bus driver ◄─────────┘
                                                       │        (inverting)
@@ -25,12 +25,12 @@ console CLI ──► value model ──► push scheduler ──► telegram en
 | | |
 |---|---|
 | Board | ESP32 classic (Xtensa) — **not** an ESP32-C3 |
-| Meter link | UART2, TX on **GPIO18**, 2400 8E1, **TX inverted** |
+| Meter link | UART2, TX on **GPIO17**, 2400 8E1, **TX inverted** |
 | Driver stage | External, inverting, logic level → 12/24 V M-Bus |
-| DUT supply | The rig provides the 5 V, ground and Data Request the reader runs on, switched from **GPIO19** |
+| DUT supply | The rig provides the 5 V, ground and Data Request the reader runs on, switched from **GPIO16** |
 
-Pins are Kconfig, not literals. The defaults avoid **GPIO16 and GPIO17**, which
-are wired to the SPI PSRAM on WROVER modules and silently do nothing there.
+Pins are Kconfig, not literals — GPIO16/17 are free on WROOM but belong to the
+SPI PSRAM on WROVER, where they silently do nothing.
 
 The reader has no supply of its own — it is powered by the meter — so a rig that
 drives only the data line leaves it dead.
