@@ -58,7 +58,7 @@ accuracy, no metrological claim, and no relationship to any real installation.
 console CLI ──► value model ──► push scheduler ──► telegram encoder ──► UART2
  (set pi …)     P, E, I, Q       every 5 s          DataNotification      2400 8E1
                                                     → GBT → HDLC          TX inverted
-                                                                          GPIO17
+                                                                          GPIO18
                                                                              │
                                               12/24 V M-Bus driver ◄─────────┘
                                                       │        (inverting)
@@ -76,7 +76,7 @@ console CLI ──► value model ──► push scheduler ──► telegram en
 | Item | Value | Provenance |
 |---|---|---|
 | MCU | ESP32 classic (Xtensa dual-core) | `[user]` |
-| Meter-link UART | **UART2**, TX **GPIO17** (U2TXD default routing) | `[user]` |
+| Meter-link UART | **UART2**, TX **GPIO18** (via the GPIO matrix) | `[user]` |
 | Console UART | UART0 (GPIO1/GPIO3), 115200 8N1 | `[derived]` |
 | Line parameters | 2400 baud, 8 data bits, **even** parity, 1 stop bit | `[doc:LG]` §3.1 |
 | Driver stage | External, **inverting**, logic → 12/24 V M-Bus levels | `[user]` |
@@ -139,7 +139,8 @@ reports rises at 1.5 kWh/h ±1 %.
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | Encoder and decoder are wrong in the same direction | Medium | Tests pass against a wire a real meter would never produce | The oracle is `dlms_parser`, which is independently validated against two real captures. Byte-exact reproduction of `e450_serial8.hex` remains available if a field discrepancy appears |
-| GPIO17 floating between reset and UART init | High | Undefined bus level; DUT sees a break or garbage on every simulator reboot | FR-LNK-05 |
+| TX pin floating between reset and UART init | High | Undefined bus level; DUT sees a break or garbage on every simulator reboot | FR-LNK-05 |
+| A pin chosen for its default UART routing collides with module-specific use | Confirmed | GPIO16/17 are the SPI PSRAM on WROVER: both APIs succeed and the pin stays dead | FR-LNK-01 avoids them |
 | Energy truncated to whole Wh per tick | High | At 777 W, 7 % of energy silently lost; at 300 W, 42 % | FR-MDL-04 |
 | EBL enables message security later | Low | Simulator output no longer resembles the meter | §7 keeps the security stage as an identity function in the pipeline, not an absence |
 
@@ -333,15 +334,15 @@ on. `[user]`
 
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
-| **FR-LNK-01** | Must | The device shall transmit on UART2, TX on GPIO17, at 2400 baud, 8 data bits, even parity, 1 stop bit. | `[doc:LG]` §3.1 |
+| **FR-LNK-01** | Must | The device shall transmit on UART2, TX on a configurable GPIO defaulting to **18**, at 2400 baud, 8 data bits, even parity, 1 stop bit. | `[doc:LG]` §3.1 |
 | **FR-LNK-02** | Must | The TX signal shall be inverted in the UART peripheral (`UART_SIGNAL_TXD_INV`). | `[user]` |
 | **FR-LNK-03** | Must | The device shall never enable a receiver on UART2. | `[derived]` |
 | **FR-LNK-04** | Must | Between telegrams the line shall rest in the mark state, presenting 24 V on the bus. | `[derived]` |
-| **FR-LNK-05** | Must | GPIO17 shall be driven to the mark-producing level before UART initialisation and within 10 ms of reset. | `[derived]` |
+| **FR-LNK-05** | Must | The TX GPIO shall be driven to the mark-producing level before UART initialisation and within 10 ms of reset. | `[derived]` |
 
 > **FR-LNK-05 is the one that bites.** With an inverting driver, UART idle drives
-> GPIO17 **low** to put 24 V (mark) on the bus. From reset until `app_main`
-> configures it, GPIO17 is a floating input and the bus level is undefined — so
+> the TX pin **low** to put 24 V (mark) on the bus. From reset until `app_main`
+> configures it, that pin is a floating input and the bus level is undefined — so
 > without this, every simulator reboot may present the DUT with a break condition
 > or noise.
 

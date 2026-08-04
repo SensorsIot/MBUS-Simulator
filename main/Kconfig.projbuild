@@ -2,10 +2,14 @@ menu "MBUS Simulator"
 
 config SIM_MBUS_TX_GPIO
     int "Meter-link UART2 TX GPIO"
-    default 17
+    default 18
     help
-        GPIO17 is U2TXD's default routing on the classic ESP32, so UART2 needs
-        no pin-matrix detour. FSD §2.1.
+        NOT 17. GPIO16 and GPIO17 are wired to the SPI PSRAM on WROVER modules
+        and are unusable as GPIOs there — gpio_config() and uart_set_pin() both
+        succeed and nothing appears on the pin. GPIO17 is U2TXD's default
+        routing, but UART2 reaches any output pin through the GPIO matrix, so
+        the default routing buys nothing worth a module-dependent pinout.
+        FSD §2.1.
 
 config SIM_TX_INVERT
     bool "Invert the meter-link TX signal"
@@ -18,7 +22,7 @@ config SIM_TX_INVERT
 
 config SIM_DUT_POWER_GPIO
     int "DUT 5 V enable GPIO"
-    default 16
+    default 19
     help
         Switches the 5 V rail the device under test runs on, so `dut off` can
         power-cycle it. Set to -1 if the rig wires 5 V permanently — the

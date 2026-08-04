@@ -20,7 +20,7 @@ jobs:
           submodules: recursive
 
       # esp32, not esp32c3: the simulator runs on a classic ESP32 devboard and
-      # drives the meter link from UART2/GPIO17 — FSD §2.1.
+      # drives the meter link from UART2 — FSD §2.1.
       - name: Build (ESP-IDF v6.0.2, esp32)
         uses: espressif/esp-idf-ci-action@v1
         with:
