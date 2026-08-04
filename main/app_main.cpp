@@ -27,6 +27,22 @@ namespace {
 
 const char *TAG = "sim";
 
+// A Kconfig bool set to 'n' is *undefined*, not 0, so it cannot be used in an
+// expression — only in #if. Normalising it here once means the rest of the file
+// can treat inversion as an ordinary boolean, and flipping it to 'n' to test the
+// polarity of a driver stage does not break the build.
+#if CONFIG_SIM_TX_INVERT
+constexpr bool TX_INVERTED = true;
+#else
+constexpr bool TX_INVERTED = false;
+#endif
+
+#if CONFIG_SIM_DUT_POWER_ACTIVE_HIGH
+constexpr bool DUT_POWER_ACTIVE_HIGH = true;
+#else
+constexpr bool DUT_POWER_ACTIVE_HIGH = false;
+#endif
+
 constexpr uart_port_t METER_UART = UART_NUM_2;
 constexpr auto TX_GPIO = static_cast<gpio_num_t>(CONFIG_SIM_MBUS_TX_GPIO);
 constexpr int DUT_POWER_GPIO = CONFIG_SIM_DUT_POWER_GPIO;
@@ -67,7 +83,7 @@ void configure_meter_link() {
     idle.pull_down_en = GPIO_PULLDOWN_DISABLE;
     idle.intr_type = GPIO_INTR_DISABLE;
     ESP_ERROR_CHECK(gpio_config(&idle));
-    gpio_set_level(TX_GPIO, CONFIG_SIM_TX_INVERT ? 0 : 1);
+    gpio_set_level(TX_GPIO, TX_INVERTED ? 0 : 1);
 
     uart_config_t cfg = {};
     cfg.baud_rate = 2400;
@@ -85,9 +101,9 @@ void configure_meter_link() {
     ESP_ERROR_CHECK(uart_param_config(METER_UART, &cfg));
     ESP_ERROR_CHECK(uart_set_pin(METER_UART, TX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
                                  UART_PIN_NO_CHANGE));
-#if CONFIG_SIM_TX_INVERT
-    ESP_ERROR_CHECK(uart_set_line_inverse(METER_UART, UART_SIGNAL_TXD_INV));
-#endif
+    if (TX_INVERTED) {
+        ESP_ERROR_CHECK(uart_set_line_inverse(METER_UART, UART_SIGNAL_TXD_INV));
+    }
 }
 
 bool dut_power_available() { return DUT_POWER_GPIO >= 0; }
@@ -103,12 +119,12 @@ void configure_dut_power() {
     cfg.mode = GPIO_MODE_OUTPUT;
     cfg.intr_type = GPIO_INTR_DISABLE;
     ESP_ERROR_CHECK(gpio_config(&cfg));
-    gpio_set_level(pin, CONFIG_SIM_DUT_POWER_ACTIVE_HIGH ? 1 : 0);
+    gpio_set_level(pin, DUT_POWER_ACTIVE_HIGH ? 1 : 0);
 }
 
 void set_dut_power(bool on) {
     if (!dut_power_available()) return;
-    const int level = CONFIG_SIM_DUT_POWER_ACTIVE_HIGH ? (on ? 1 : 0) : (on ? 0 : 1);
+    const int level = DUT_POWER_ACTIVE_HIGH ? (on ? 1 : 0) : (on ? 0 : 1);
     gpio_set_level(static_cast<gpio_num_t>(DUT_POWER_GPIO), level);
 }
 
@@ -364,7 +380,7 @@ extern "C" void app_main() {
     configure_dut_power();
 
     ESP_LOGI(TAG, "E450 simulator: EBL Consumer Information 1, 13 objects, %d s, 2400 8E1%s",
-             PUSH_PERIOD_SECONDS, CONFIG_SIM_TX_INVERT ? " inverted" : "");
+             PUSH_PERIOD_SECONDS, TX_INVERTED ? " inverted" : "");
 
     xTaskCreate(&scheduler_task, "scheduler", 6144, nullptr, 5, nullptr);
 
