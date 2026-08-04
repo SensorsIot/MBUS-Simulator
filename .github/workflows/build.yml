@@ -1,0 +1,60 @@
+name: build
+
+# Firmware is built here, not in the devcontainer — the ESP-IDF toolchain is
+# deliberately not installed locally. See .devcontainer/Dockerfile.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build (ESP-IDF v6.0.2, esp32c3)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0.2
+          target: esp32c3
+          path: '.'
+
+      - name: Report artifact sizes
+        run: |
+          ls -l build/*.bin
+          # idf.py size needs the toolchain, so just report the raw sizes here
+          echo "app: $(stat -c%s build/MBUS-Simulator.bin 2>/dev/null || echo '?') bytes"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32c3
+          path: |
+            build/*.bin
+            build/*.elf
+            build/*.map
+            build/flasher_args.json
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware-esp32c3
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
