@@ -19,11 +19,13 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build (ESP-IDF v6.0.2, esp32c3)
+      # esp32, not esp32c3: the simulator runs on a classic ESP32 devboard and
+      # drives the meter link from UART2/GPIO17 — FSD §2.1.
+      - name: Build (ESP-IDF v6.0.2, esp32)
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v6.0.2
-          target: esp32c3
+          target: esp32
           path: '.'
 
       - name: Report artifact sizes
@@ -34,7 +36,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: firmware-esp32c3
+          name: firmware-esp32
           path: |
             build/*.bin
             build/*.elf
@@ -51,7 +53,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: firmware-esp32c3
+          name: firmware-esp32
           path: dist
 
       - uses: softprops/action-gh-release@v2
