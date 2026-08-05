@@ -1,2 +1,5 @@
 .claude-data/
 build/
+
+# Scratch files, never part of a build or a deliverable.
+tmp/
