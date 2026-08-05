@@ -719,6 +719,95 @@ void case_fault_none_is_transparent() {
           "no fault means the same bytes as the plain encoder");
 }
 
+
+// FR-MOD-06 — the counted ramp: the first byte received is the loss count.
+void case_mode_ramp() {
+    const std::vector<uint8_t> r = e450::ramp_bytes(381);
+    check(r.size() == 381, "the requested length");
+    check(r[0] == 0x00, "every burst starts at zero, or the count means nothing");
+    for (std::size_t i = 0; i < r.size(); ++i) {
+        check(r[i] == uint8_t(i & 0xFF), "byte i is i mod 256");
+    }
+
+    // The property the mode exists for, stated as the test: drop the first k
+    // bytes and the first byte you now see *is* k.
+    for (const std::size_t lost : {std::size_t(1), std::size_t(25), std::size_t(255)}) {
+        const std::vector<uint8_t> received(r.begin() + std::ptrdiff_t(lost), r.end());
+        check(received[0] == uint8_t(lost), "first byte received equals bytes lost");
+    }
+    std::printf("  381 bytes, wraps at 256, loss readable up to 255\n");
+
+    // Same duration as a telegram, which is what makes it comparable.
+    check(e450::wire_time_ms(r.size()) == e450::wire_time_ms(381),
+          "same wire time as the telegram it stands in for");
+}
+
+// FR-FLT-16 — a preamble ahead of the first frame, and what it costs.
+//
+// The directive exists to answer "is a lead-in a viable mitigation?", so this
+// case is written to *record the answer*, not to assume one. It is a
+// characterisation test: if the oracle's behaviour ever changes, it fails, and
+// whoever reads it learns what changed.
+void case_preamble() {
+    const auto frames = fault_frames();
+    const std::vector<uint8_t> plain = e450::apply_wire_fault(frames, e450::FaultSpec{}, 0);
+
+    // Structural: the burst grows by exactly the preamble and the telegram
+    // behind it is untouched. This part is ours and must always hold.
+    for (const uint8_t filler : {uint8_t(0x7E), uint8_t(0x00)}) {
+        const std::vector<uint8_t> led =
+            e450::apply_wire_fault(frames, e450::FaultSpec{}, 32, filler);
+        check(led.size() == plain.size() + 32, "the burst grows by exactly the preamble");
+        for (int i = 0; i < 32; ++i) check(led[i] == filler, "filler is the byte asked for");
+        check(std::equal(plain.begin(), plain.end(), led.begin() + 32),
+              "the telegram after the preamble is byte-identical");
+    }
+
+    // Behavioural: what a decoder makes of it. Recorded, because this is the
+    // finding the directive was built to produce.
+    std::size_t bare = 0, one_flag = 0, many_flags = 0, non_flag = 0;
+    decode(plain, &bare);
+    decode(e450::apply_wire_fault(frames, e450::FaultSpec{}, 1, 0x7E), &one_flag);
+    decode(e450::apply_wire_fault(frames, e450::FaultSpec{}, 32, 0x7E), &many_flags);
+    decode(e450::apply_wire_fault(frames, e450::FaultSpec{}, 32, 0x00), &non_flag);
+    std::printf("  captures: bare=%zu  1x7E=%zu  32x7E=%zu  32x00=%zu\n", bare, one_flag,
+                many_flags, non_flag);
+
+    check(bare > 0, "the telegram decodes with no preamble at all");
+    check(one_flag == 0 && many_flags == 0,
+          "recorded: this decoder rejects a telegram behind ANY flag fill, even one byte");
+    check(non_flag > 0 && non_flag < bare,
+          "recorded: non-flag fill costs the first frame and no more");
+}
+
+// FR-FLT-16 with FR-FLT-05 — the mitigation, tested as a mitigation.
+void case_preamble_absorbs_truncation() {
+    const auto frames = fault_frames();
+    e450::FaultSpec cut;
+    cut.kind = e450::Fault::StartMidFrame;
+
+    // Without a lead-in, the cut lands inside frame 1 and the stream no longer
+    // starts on a flag.
+    const std::vector<uint8_t> bare = e450::apply_wire_fault(frames, cut, 0);
+    check(bare[0] != 0x7E, "with no preamble the cut eats into frame 1");
+
+    // With a lead-in at least as long as the cut, frame 1 arrives whole — which
+    // is the entire argument for emitting a preamble at all.
+    const std::vector<uint8_t> shielded =
+        e450::apply_wire_fault(frames, cut, e450::START_MID_FRAME_SKIP, 0x00);
+    check(shielded.size() == e450::apply_wire_fault(frames, e450::FaultSpec{}, 0).size(),
+          "the preamble absorbed the cut exactly");
+    check(std::equal(frames[0].begin(), frames[0].end(), shielded.begin()),
+          "frame 1 survives intact behind the preamble");
+
+    std::size_t bare_count = 0, shielded_count = 0;
+    decode(bare, &bare_count);
+    decode(shielded, &shielded_count);
+    std::printf("  truncated start: %zu captures bare, %zu behind a %zu-byte preamble\n",
+                bare_count, shielded_count, e450::START_MID_FRAME_SKIP);
+    check(shielded_count >= bare_count, "the preamble does not make things worse");
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -753,6 +842,9 @@ int main(int argc, char **argv) {
     else if (name == "identity") case_directive_identity();
     else if (name == "energy") case_directive_energy();
     else if (name == "scaler") case_directive_scaler();
+    else if (name == "ramp") case_mode_ramp();
+    else if (name == "preamble") case_preamble();
+    else if (name == "preamble_cut") case_preamble_absorbs_truncation();
     else {
         std::fprintf(stderr, "unknown case: %s\n", name.c_str());
         return 2;

@@ -18,6 +18,7 @@ namespace e450 {
 //   Pattern  bytes, no protocol         does any signal come off the line?
 //   Simple   one frame, real values     is a single telegram decodable?
 //   E450     the full list, varying     can it decode *this meter's* telegrams?
+//   Ramp     counted bytes, no protocol *how many* bytes were lost, exactly?
 //
 // Between Simple and E450 lie the two things most likely to break a decoder:
 // multi-block General Block Transfer reassembly, and values it has not seen
@@ -27,6 +28,7 @@ enum class Mode : uint8_t {
     Pattern = 1,
     Simple = 2,
     E450 = 3,
+    Ramp = 4,
 };
 
 // Mode 1 — FR-MOD-02. A burst of 0x55 on the same cadence as a telegram, not a
@@ -50,6 +52,20 @@ std::span<const CaptureObject> objects();
 std::vector<TelegramValue> values();
 
 }  // namespace simple
+
+// Mode 4 — FR-MOD-06. `00 01 02 … FF` repeating, for exactly as many bytes as a
+// mode 3 telegram occupies, then the same silence.
+//
+// The whole value is in the first byte received. It *is* the number of bytes
+// lost off the front of the burst: receive `0x19` and 25 bytes went missing, no
+// arithmetic and no second log to correlate against. Every other way of
+// measuring this subtracts a count taken on one device from a count taken on
+// another and hopes both refer to the same burst.
+//
+// Loss is therefore measured modulo 256 — beyond that the count wraps and the
+// answer is ambiguous. At 2400 baud, 256 bytes is 1.2 s of line time, so a
+// wrap means something far larger than a lead-in problem is wrong.
+std::vector<uint8_t> ramp_bytes(std::size_t count);
 
 // Mode 3 — FR-MOD-04. Choose the next load, then let the model integrate it.
 //

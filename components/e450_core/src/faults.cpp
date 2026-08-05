@@ -28,10 +28,13 @@ std::vector<uint8_t> noise_bytes(uint32_t count) {
 }
 
 std::vector<uint8_t> apply_wire_fault(const std::vector<std::vector<uint8_t>> &frames,
-                                      const FaultSpec &fault) {
+                                      const FaultSpec &fault, uint32_t preamble,
+                                      uint8_t preamble_byte) {
     std::vector<uint8_t> out;
 
     if (fault.kind == Fault::Noise) return noise_bytes(fault.arg);
+
+    out.assign(preamble, preamble_byte);
 
     for (std::size_t i = 0; i < frames.size(); ++i) {
         const std::size_t number = i + 1;  // directives are 1-based
@@ -68,13 +71,18 @@ std::vector<uint8_t> apply_wire_fault(const std::vector<std::vector<uint8_t>> &f
                 break;
 
             case Fault::StartMidFrame:
-                // FR-FLT-05. Begin partway through frame 1, as if reception
-                // started mid-transmission. Later frames are untouched, so a
-                // receiver that resynchronises recovers everything after the
-                // first flag it finds.
+                // FR-FLT-05. Begin partway through the burst, as if reception
+                // started mid-transmission. The cut is taken from the front of
+                // everything sent, so a preamble is eaten before frame 1 is —
+                // see the note in faults.h.
                 if (number == 1) {
-                    const std::size_t skip =
-                        START_MID_FRAME_SKIP < frame.size() ? START_MID_FRAME_SKIP : 0;
+                    const std::size_t already = out.size();
+                    const std::size_t want = START_MID_FRAME_SKIP;
+                    const std::size_t from_preamble = already < want ? already : want;
+                    out.erase(out.begin(),
+                              out.begin() + static_cast<std::ptrdiff_t>(from_preamble));
+                    const std::size_t remaining = want - from_preamble;
+                    const std::size_t skip = remaining < frame.size() ? remaining : 0;
                     frame.erase(frame.begin(), frame.begin() + static_cast<std::ptrdiff_t>(skip));
                 }
                 break;

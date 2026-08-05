@@ -34,6 +34,15 @@ std::vector<TelegramValue> values() {
 
 }  // namespace simple
 
+std::vector<uint8_t> ramp_bytes(std::size_t count) {
+    std::vector<uint8_t> out;
+    out.reserve(count);
+    // Starts at zero every burst, without exception: the first byte is only a
+    // loss count because the sender's first byte is known to be 0x00.
+    for (std::size_t i = 0; i < count; ++i) out.push_back(static_cast<uint8_t>(i & 0xFF));
+    return out;
+}
+
 void apply_random_load(ValueModel &model, Rng &rng) {
     // A household, not a uniform sample. One draw in eight is export, standing
     // in for a roof that is generating; the rest is consumption. Both are

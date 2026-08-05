@@ -293,6 +293,7 @@ layer to the one below, so the first that fails names the fault. `[user]`
 | **1 pattern** | `0x55`, no protocol | Does a signal come off the bus, at the right line settings? |
 | **2 simple** | One frame, three objects, fixed values | Is a single telegram decodable at all? |
 | **3 e450** | The full 13-object list, values changing every emission | Can it decode *this meter's* telegrams? |
+| **4 ramp** | `00 01 02 … FF` repeating, telegram-sized | **How many** bytes were lost, exactly? |
 
 Between 2 and 3 lie the two things most likely to defeat a decoder: multi-block
 General Block Transfer reassembly, and values it has not seen before. Running
@@ -308,6 +309,20 @@ them in order separates *the line is wrong* from *the decoder is wrong* from
 | **FR-MOD-03** | Must | Mode 2 shall emit a telegram of one push-setup object and two registers with **fixed** values, occupying exactly one GBT block and one HDLC frame. | `[user]` |
 | **FR-MOD-04** | Must | Mode 3 shall emit the Appendix A list with a load chosen per emission by a generator seeded identically at every boot, and shall choose that load **before** integrating the period, so the energy in a telegram equals the power in that same telegram times the period. | `[user]` |
 | **FR-MOD-05** | Must | Every emission shall be logged on the console with its mode and the values it carried. | `[derived]` |
+| **FR-MOD-06** | Must | Mode 4 shall emit `00 01 02 … FF` repeating, beginning at `0x00`, for exactly as many bytes as a mode 3 telegram in the current configuration occupies, followed by the same silence. | `[user]` |
+
+> **Why a counted ramp is worth a mode of its own.** Loss is currently measured
+> by subtracting a byte count taken on one device from a byte count taken on
+> another, and trusting that both refer to the same burst. The ramp removes the
+> subtraction and the trust: **the first byte received *is* the number of bytes
+> lost.** Receive `0x19` and exactly 25 bytes went missing. No arithmetic, no
+> second log, no correlation.
+>
+> It works only because the first byte sent is always `0x00`, which is why
+> FR-MOD-06 states that rather than leaving it to the generator. Loss is read
+> modulo 256; beyond that the count wraps, but 256 bytes is 1.2 s of line time
+> at 2400 baud, so a wrap means something much larger than a lead-in problem.
+> `[user]`
 
 > **Why mode 1 bursts rather than streams.** A transmission is delimited by the
 > silence that follows it, so a stream with no end is one nothing downstream ever
@@ -337,6 +352,8 @@ them in order separates *the line is wrong* from *the decoder is wrong* from
 | FR-MOD-04 | 50 draws from the seeded generator | >25 distinct loads; import and export never both non-zero | A constant; both directions at once | host |
 | FR-MOD-04 | Two runs from reset, same seed | Identical load sequence | Any divergence | host |
 | FR-MOD-04 | 12 emissions; compare energy to Σ(P × period) | Equal | Energy that does not match the powers reported | host |
+| FR-MOD-06 | Generate the ramp; drop the first *k* bytes for k = 1, 25, 255 | The new first byte equals *k* every time | A first byte that is not the loss count | host |
+| FR-MOD-06 | `mode 4` on the bench | Byte count and wire time equal a mode 3 telegram's | A burst of a different length | bench |
 | FR-MOD-05 | Any emission | Console line names mode and values | A mode-3 emission whose values are unrecorded | bench |
 
 ---
@@ -387,6 +404,38 @@ was tried somewhere and hurt:
 | **FR-FLT-13** | Must | `scaler <n>` shall emit registers in the self-describing form carrying scaler *n*, such that the transmitted value is `raw × 10ⁿ` applied exactly once; `scaler 0` shall restore bare values. | `[user]` |
 | **FR-FLT-14** | Must | Every emission shall be reported on the console as `key=value` pairs including the emission number, mode, fault applied, byte count and frame count. | `[user]` |
 | **FR-FLT-15** | Must | Every directive in this chapter shall be settable at runtime over the console, and none shall be a build-time option. | `[user]` |
+| **FR-FLT-16** | Must | `preamble <n> [byte]` shall prepend *n* bytes of filler ahead of the first frame **inside the same burst**, defaulting to `0x7E`, leaving the telegram behind it byte-identical. | `[user]` |
+| **FR-FLT-17** | Must | The emission report shall carry the **measured** transmission duration `tx_ms` alongside the computed `wire_ms`, and the delay from transmission starting to the line leaving idle as `lead_us` — reporting `n/a` when no line-sense input is wired rather than substituting a quantity it can measure. | `[user]` |
+
+> **On FR-FLT-16 — the faithful filler is not the safe one.** HDLC calls
+> repeated flags inter-frame fill, so `0x7E` is what a real meter's lead-in
+> would look like, and it is the default for that reason. It is also, measured
+> against `dlms_parser` v2.1.0, **fatal**: one single leading `0x7E` takes a
+> telegram from 12 decoded captures to zero, and thirty-two do the same. A
+> non-flag filler costs only the first frame — 6 captures of 12 — and the
+> receiver resynchronises for the rest.
+>
+> That is why the filler byte is a parameter and not a constant. A directive
+> built to answer "is a lead-in a viable mitigation?" must be able to express
+> the alternatives, and the answer for at least one decoder is "not with flags".
+> `[measured]`
+
+> **On FR-FLT-17 — what cannot be measured, and why it says so.** The quantity
+> asked for is the delay between *the line* leaving idle and the first data bit.
+> The firmware cannot see the line: it drives GPIO17 into a driver stage and has
+> no path back from the bus. It knows only when it handed bytes to the UART,
+> which is a different quantity, and reporting that as though it were the answer
+> would put a number where an unknown is.
+>
+> So `lead_us` reports `n/a` unless `SIM_LINE_SENSE_GPIO` names an input wired
+> back from the **driver stage's output**, at which point an edge-triggered ISR
+> timestamps the first transition and the figure is real to about a microsecond.
+> The pin is Kconfig rather than a console directive because it is a fact about
+> the wiring, like the TX pin — not a test parameter.
+>
+> `tx_ms` needs no extra hardware and is worth having on its own: `wire_ms` is
+> arithmetic on the byte count and would read 1747 ms even if the UART were
+> misconfigured. The two disagreeing is a finding. `[derived]`
 
 > **On FR-FLT-13 — the scaler is a different shape, and that is deliberate.** The
 > E450 carries bare values with no scaler anywhere (FR-ENC-04), so a decoder given
@@ -431,6 +480,10 @@ was tried somewhere and hurt:
 | FR-FLT-13 | `scaler -2`, `0`, `2` with a 12345 register | Decoded 123.45, 12345, 1 234 500 | Scaling applied twice or not at all | host |
 | FR-FLT-14 | Any emission | One `key=value` line with `n=`, `mode=`, `fault=`, `bytes=`, `frames=` | A fault applied but not reported | bench |
 | FR-FLT-15 | `idf.py menuconfig` | No option for any directive in §14.2 | Any directive reachable only by rebuilding | host |
+| FR-FLT-16 | `preamble 32`, both fillers; compare bytes | Burst grows by exactly 32; telegram behind it byte-identical | Any change to the telegram | host |
+| FR-FLT-16 | Decode with 0, 1 and 32 flag bytes and 32 non-flag bytes | 12, 0, 0, 6 captures — the recorded characterisation | A silent change in this behaviour going unnoticed | host |
+| FR-FLT-17 | Any emission with no sense pin wired | `lead_us=n/a` | A number presented as a line measurement | bench |
+| FR-FLT-17 | Any emission | `tx_ms` within 5 % of `wire_ms` | A silent disagreement between the two | bench |
 
 ---
 

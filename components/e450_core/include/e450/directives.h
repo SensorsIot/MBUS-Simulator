@@ -24,6 +24,15 @@ struct EmissionConfig {
     // the only way to place a boundary at 1999 vs 2000 ms (FR-FLT-08).
     uint32_t gap_ms = 0;
 
+    // Bytes of filler ahead of the first frame, inside the same burst
+    // (FR-FLT-16). Zero is the E450's own behaviour as captured.
+    uint32_t preamble_bytes = 0;
+    // 0x7E is the faithful choice — HDLC calls repeated flags inter-frame fill
+    // — but "faithful" and "survivable" are different claims, and at least one
+    // decoder rejects a telegram outright when even one flag precedes it. So the
+    // filler is selectable: the point of the directive is to find out.
+    uint8_t preamble_byte = 0x7E;
+
     uint8_t serial_chars = 8;  // 8 or 16 (FR-FLT-11)
     Identity identity = Identity::None;
 

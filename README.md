@@ -6,9 +6,10 @@ interface of a Landis+Gyr **E450** smart meter as parametrised by **EBL Liestal*
 regression-tested without a physical meter.
 
 It is a generator, not a tape player. Three modes form a diagnostic ladder — a
-bare `0x55` pattern, one small telegram with fixed values, and the full 13-object
-E450 list whose load changes on every emission, so a decoder has to read each
-message rather than cache one. Energy integrates the transmitted power
+bare `0x55` pattern, one small telegram with fixed values, the full 13-object
+E450 list whose load changes on every emission so a decoder has to read each
+message rather than cache one, and a counted ramp whose first received byte *is*
+the number of bytes lost. Energy integrates the transmitted power
 throughout, so the arithmetic a decode produces can be checked, not just its
 parsing.
 
@@ -92,7 +93,7 @@ a diagnostic chapter that walks down the three modes to localise a fault, and th
 runtime directives that provoke faults deliberately.
 
 [`docs/Functionality/MBUS-Simulator-FSD.md`](docs/Functionality/MBUS-Simulator-FSD.md)
-is the contract: 70 requirements, each with a verification contract naming the
+is the contract: 73 requirements, each with a verification contract naming the
 outcome that would falsify it. `docs/Standard CIP-Liste_DE.pdf` is Landis+Gyr's
 public Swiss customer-interface specification; note that EBL's parametrisation
 differs from that standard list in both directions, and EBL's wins here.

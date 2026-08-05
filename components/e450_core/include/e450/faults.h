@@ -18,8 +18,20 @@ namespace e450 {
 // the line. With Fault::None it is a plain concatenation, which is exactly what
 // encode_telegram does — so a fault-free emission goes down the same path as a
 // faulted one, and the path itself is not a variable.
+// `preamble` bytes of filler are laid down first, inside the same burst
+// (FR-FLT-16), and Fault::StartMidFrame cuts from the front of the whole burst
+// — preamble included. That is not an oversight: a lead-in that is long enough
+// to absorb the truncation is exactly what a preamble is *for*, so the
+// interaction is the mitigation being tested, not a fault being defeated.
 std::vector<uint8_t> apply_wire_fault(const std::vector<std::vector<uint8_t>> &frames,
-                                      const FaultSpec &fault);
+                                      const FaultSpec &fault, uint32_t preamble = 0,
+                                      uint8_t preamble_byte = 0x7E);
+
+// The default filler. HDLC treats repeated flags between frames as inter-frame
+// fill, so 0x7E is what a real lead-in would look like — but see the
+// characterisation in the host tests before assuming it is *safe*: a decoder is
+// entitled to reject `7E 7E` as a zero-length frame, and one does.
+inline constexpr uint8_t PREAMBLE_BYTE = 0x7E;
 
 // FR-FLT-07. `count` bytes containing no 0x7E and no valid framing, so a
 // receiver sees a burst arrive and finds nothing in it. Deterministic, so a

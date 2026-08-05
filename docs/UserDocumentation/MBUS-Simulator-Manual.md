@@ -22,6 +22,7 @@ than the one below, so the first that fails tells you where the problem is:
 | **1** | A plain test pattern | Whether any signal is arriving at all |
 | **2** | One small reading, always the same numbers | Whether the receiver can decode anything |
 | **3** | The real thing, values changing every time | Whether it can decode a real meter |
+| **4** | A counted sequence, telegram-sized | **How many bytes** are being lost |
 
 Mode 3 is the default and the one you will normally use. Its values change on
 every reading, deliberately: a receiver cannot pass by remembering a number, it
@@ -168,6 +169,7 @@ If it shows nothing, go to `mode 1` and chapter 5.2.
 | `mode 1` | Test pattern — is a signal arriving? |
 | `mode 2` | Small fixed reading — can the receiver decode? |
 | `mode 3` | Full E450, changing values — can it decode the real thing? |
+| `mode 4` | Counted ramp — how many bytes are being lost? |
 | `status` | Show everything, on one line |
 | `set time <YYYY-MM-DDTHH:MM:SS>` | Move the clock |
 | `help` | List the commands |
@@ -312,7 +314,47 @@ OBIS codes are typed the way a decoder prints them: `fault duplicate-register
 changing ones — otherwise you could not say what the correct answer was supposed
 to be.
 
-### 6.2 Timing
+### 6.2 Counting lost bytes, and lead-in
+
+If readings arrive but are damaged, the question is usually *how much of the
+start went missing*. **Mode 4 answers it directly.**
+
+It sends `00 01 02 03 …` counting up, for exactly as long as a real reading
+takes. So whatever your receiver logs as its **first byte is the number of
+bytes that were lost.** First byte `0x19`? Twenty-five bytes went missing.
+First byte `0x00`? Nothing was lost.
+
+```
+sim> mode 4
+OK 4 ramp
+```
+
+No subtracting one device's count from another's and hoping they refer to the
+same burst. (It counts up to 255 and starts over, so losses beyond 255 bytes
+are ambiguous — but that is 1.2 seconds of missing line, which is a different
+problem.)
+
+Once you know how much is lost, `preamble` tests whether a lead-in fixes it:
+
+```
+sim> preamble 32
+OK preamble=32 bytes of 0x7E
+```
+
+It sends *n* bytes of padding before the real reading, in the same burst, so
+anything lost off the front is padding rather than data.
+
+**Which padding byte matters, a lot.** The default `0x7E` is the "correct"
+choice on paper — the M-Bus framing standard calls repeated `0x7E` harmless
+padding. Measured against a real decoder, it is the worst possible choice: **a
+single leading `0x7E` stopped a working reading from decoding at all.** Padding
+with something else cost only the first frame. So try both:
+
+```
+sim> preamble 32 0x00      # padding that is not a frame marker
+```
+
+### 6.3 Timing
 
 ```
 sim> gap 2000
@@ -329,7 +371,7 @@ schedule until you set `gap 0`.
 keeps running: the clock advances, the console answers, and it starts again on
 its own.
 
-### 6.3 Changing what the reading contains
+### 6.4 Changing what the reading contains
 
 | Command | Effect |
 |---|---|
@@ -351,14 +393,27 @@ Two notes worth having:
   set, the simulator sends the self-describing form other meters use. It is a
   test of the receiver, not an imitation of this meter.
 
-### 6.4 What gets reported
+### 6.5 What gets reported
 
 Every reading is logged as `key=value`, so a script can check it rather than
 guess:
 
 ```
-I sim: emit n=42 mode=e450 fault=fcs:2 bytes=381 frames=3 wire_ms=1747 silent_ms=3253 gpio=17 pi=777 ei=777 fixed=1
+I sim: emit n=42 mode=e450 fault=fcs:2 bytes=381 frames=3 pre=0/0x7E wire_ms=1747
+       tx_ms=1748 lead_us=n/a silent_ms=3253 gpio=17 pi=777 ei=777 fixed=1
 ```
+
+`wire_ms` is calculated from the byte count; `tx_ms` is what actually took
+place. They should agree — if they do not, something is wrong with the link
+itself.
+
+`lead_us` would be the delay between the line waking up and the first data bit.
+It reports **`n/a` by default and that is deliberate**: the simulator drives the
+interface board but has no wire back from it, so it cannot see the line. To get
+a real number, connect the interface board's output back to a spare input pin
+and set `SIM_LINE_SENSE_GPIO`. Until then the honest answer is that nobody
+knows, and the log says so rather than printing something that looks like a
+measurement.
 
 `fault=` and `frames=` are the two that matter for fault testing: they let you
 assert *which* frame was damaged out of *how many*, instead of only noticing
@@ -368,7 +423,7 @@ that something went wrong somewhere.
 
 ```
 OK pi=777 … mode=3/e450 period=5 gap=0 silence=0 serial=8 identity=none
-   scaler=0 energy=auto fault=none emissions=42
+   preamble=0/0x7E scaler=0 energy=auto fault=none emissions=42
 ```
 
 ---

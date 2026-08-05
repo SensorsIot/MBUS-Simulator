@@ -22,6 +22,19 @@ config SIM_TX_INVERT
         byte a one-inversion mismatch produces (see FR-LNK-02). Turn it back on
         only for a driver stage that inverts. FSD FR-LNK-02.
 
+config SIM_LINE_SENSE_GPIO
+    int "Line-sense feedback GPIO (-1 for none)"
+    default -1
+    help
+        Optional input wired back from the *driver stage's output* — not from
+        the TX pin — so the firmware can timestamp the moment the line actually
+        leaves idle and report it as lead_us (FSD FR-FLT-17).
+
+        This is a wiring fact, not a test parameter, which is why it lives here
+        rather than on the console. With no such wire the firmware knows only
+        when it handed bytes to the UART, which is not the same quantity and
+        must not be reported as if it were: lead_us then says n/a.
+
 config SIM_PUSH_PERIOD_SECONDS
     int "Seconds between telegrams"
     default 5

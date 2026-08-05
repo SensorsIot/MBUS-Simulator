@@ -72,3 +72,6 @@ add_test(NAME FR-FLT-02-07.no-fault-is-transparent   COMMAND test_encode fault_n
 add_test(NAME FR-FLT-10-11.identity-and-serial       COMMAND test_encode identity)
 add_test(NAME FR-FLT-12.energy-set-exactly           COMMAND test_encode energy)
 add_test(NAME FR-FLT-13.scaler-applied-once          COMMAND test_encode scaler)
+add_test(NAME FR-MOD-06.ramp-counts-lost-bytes       COMMAND test_encode ramp)
+add_test(NAME FR-FLT-16.preamble-is-transparent      COMMAND test_encode preamble)
+add_test(NAME FR-FLT-16.preamble-absorbs-truncation  COMMAND test_encode preamble_cut)
