@@ -11,7 +11,8 @@ set(E450_CORE_SRCS
     src/datetime.cpp
     src/value_model.cpp
     src/telegram.cpp
-    src/ebl_ci1.cpp)
+    src/ebl_ci1.cpp
+    src/modes.cpp)
 
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${E450_CORE_SRCS} INCLUDE_DIRS include)

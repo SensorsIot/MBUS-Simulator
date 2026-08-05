@@ -13,6 +13,8 @@
 #include "driver/uart.h"
 #include "e450/datetime.h"
 #include "e450/ebl_ci1.h"
+#include "e450/modes.h"
+#include "e450/rng.h"
 #include "e450/telegram.h"
 #include "e450/value_model.h"
 #include "esp_console.h"
@@ -57,13 +59,18 @@ SemaphoreHandle_t g_lock = nullptr;
 // bring-up pattern and a scheduled telegram could interleave on the line — the
 // one thing FR-SCH-06 forbids.
 SemaphoreHandle_t g_tx_lock = nullptr;
-bool g_paused = false;
-// FR-CLI-07. Distinct from g_paused: `tx` must not disturb the pause state the
-// operator set, and must restore exactly what it found.
-bool g_tx_pattern = false;
-bool g_burst_requested = false;
+// FR-MOD-01. The one control the operator has: which of the three things this
+// simulator can put on the wire it is currently putting there. Mode 3 at boot,
+// because the faithful behaviour is the default and the other two are what you
+// drop to when it does not work.
+e450::Mode g_mode = e450::Mode::E450;
+
+// FR-MOD-04. Seeded once at boot and never reseeded, so a run from reset
+// replays byte for byte (FR-CLK-04) while still being unpredictable to a reader.
+e450::Rng g_rng{e450::MODE3_SEED};
+
 uint32_t g_invoke_id = 0;
-uint32_t g_telegrams = 0;
+uint32_t g_emissions = 0;
 
 struct Lock {
     Lock() { xSemaphoreTake(g_lock, portMAX_DELAY); }
@@ -112,34 +119,81 @@ void configure_meter_link() {
 
 // ----------------------------------------------------------------- scheduler
 
-void transmit_telegram() {
-    std::vector<e450::TelegramValue> values;
-    e450::TelegramSpec spec;
-    uint32_t invoke_id;
-    e450::DateTime when;
+const char *mode_name(e450::Mode mode) {
+    switch (mode) {
+        case e450::Mode::Pattern: return "pattern";
+        case e450::Mode::Simple: return "simple";
+        case e450::Mode::E450: return "e450";
+    }
+    return "?";
+}
 
-    {
+// What this mode puts on the line, plus a description of what is in it.
+//
+// The description is not decoration. In mode 3 the values change every emission,
+// so the only way to check a reader is to compare what it reported against what
+// was actually sent — and this line is that record.
+struct Payload {
+    std::vector<uint8_t> wire;
+    uint32_t id = 0;
+    char note[96] = {};
+};
+
+Payload build_payload(e450::Mode mode) {
+    Payload out;
+
+    if (mode == e450::Mode::Pattern) {
+        // FR-MOD-02. No protocol at all: 0x55 alternates every bit, so what
+        // comes out at the far end reports the line settings and nothing else.
+        out.wire.assign(e450::PATTERN_BURST_BYTES, e450::PATTERN_BYTE);
         Lock held;
-        values = e450::ebl::ci1_values(g_model);
-        invoke_id = g_invoke_id++;
-        when = g_clock.now();
-        ++g_telegrams;
+        out.id = g_emissions++;
+        std::snprintf(out.note, sizeof(out.note), "0x%02X x %u", e450::PATTERN_BYTE,
+                      static_cast<unsigned>(e450::PATTERN_BURST_BYTES));
+        return out;
     }
 
-    spec.objects = e450::ebl::ci1_objects();
-    spec.values = values;
-    spec.invoke_id = invoke_id;
-    spec.timestamp = when;
+    // `values` must outlive the encode call below — TelegramSpec holds a view of
+    // it, not a copy.
+    std::vector<e450::TelegramValue> values;
+    e450::TelegramSpec spec;
+    {
+        Lock held;
+        spec.invoke_id = g_invoke_id++;
+        spec.timestamp = g_clock.now();
+        out.id = g_emissions++;
 
-    const std::vector<uint8_t> wire = e450::encode_telegram(spec);
+        if (mode == e450::Mode::Simple) {
+            spec.objects = e450::simple::objects();
+            values = e450::simple::values();
+            std::snprintf(out.note, sizeof(out.note), "p=%" PRIu32 " W e=%" PRIu32 " Wh",
+                          e450::simple::ACTIVE_POWER_W, e450::simple::ACTIVE_ENERGY_WH);
+        } else {
+            spec.objects = e450::ebl::ci1_objects();
+            values = e450::ebl::ci1_values(g_model);
+            std::snprintf(out.note, sizeof(out.note),
+                          "pi=%" PRIu32 " po=%" PRIu32 " ei=%" PRIu32 " eo=%" PRIu32
+                          " i=%" PRIu32,
+                          g_model.import_w(), g_model.export_w(), g_model.import_wh(),
+                          g_model.export_wh(), g_model.current_ma());
+        }
+    }
 
-    // Blocking, deliberately. At 2400 baud a telegram takes about 1.6 s, and the
+    spec.bind_values(values);
+    out.wire = e450::encode_telegram(spec);
+    return out;
+}
+
+void emit(e450::Mode mode) {
+    const Payload payload = build_payload(mode);
+
+    // Blocking, deliberately. At 2400 baud a telegram takes about 1.7 s, and the
     // next tick is 5 s away — but more importantly this is what makes FR-SCH-06
-    // true by construction: one task owns the line, so two telegrams can never
+    // true by construction: one task owns the line, so two emissions can never
     // interleave on it. The clock is driven from esp_timer deltas, not from this
     // task's progress, so blocking here costs no time.
     xSemaphoreTake(g_tx_lock, portMAX_DELAY);
-    uart_write_bytes(METER_UART, wire.data(), wire.size());
+    uart_write_bytes(METER_UART, payload.wire.data(), payload.wire.size());
     uart_wait_tx_done(METER_UART, portMAX_DELAY);
     xSemaphoreGive(g_tx_lock);
 
@@ -148,25 +202,27 @@ void transmit_telegram() {
     // every period puts the fault after the pin, its absence puts it before.
     //
     // The silence figure is here rather than only at boot because it is the one
-    // number that decides whether the reader sees two telegrams or one merged
-    // burst (FR-SCH-08), and it moves whenever the telegram does.
-    const int32_t silence = e450::silence_ms(wire.size(), PUSH_PERIOD_SECONDS * 1000);
-    ESP_LOGI(TAG, "telegram %" PRIu32 ": %u bytes on GPIO%d, %" PRIu32 " ms on the wire, "
-                  "%" PRId32 " ms silent",
-             invoke_id, static_cast<unsigned>(wire.size()), CONFIG_SIM_MBUS_TX_GPIO,
-             e450::wire_time_ms(wire.size()), silence);
+    // number that decides whether the reader sees two emissions or one merged
+    // burst (FR-SCH-08), and it moves whenever the payload does.
+    const int32_t silence = e450::silence_ms(payload.wire.size(), PUSH_PERIOD_SECONDS * 1000);
+    ESP_LOGI(TAG,
+             "%s %" PRIu32 ": %u bytes on GPIO%d, %" PRIu32 " ms on the wire, %" PRId32
+             " ms silent - %s",
+             mode_name(mode), payload.id, static_cast<unsigned>(payload.wire.size()),
+             CONFIG_SIM_MBUS_TX_GPIO, e450::wire_time_ms(payload.wire.size()), silence,
+             payload.note);
 
-    // FR-SCH-08. Loud, and only once: a periodic error line would bury the
-    // telegram log it is trying to qualify, but a silent one lets the rig go on
-    // producing bursts the reader merges — which looks like a decode fault at
-    // the far end and gets debugged there, wrongly.
+    // FR-SCH-08. Loud, and only once: a periodic error line would bury the log
+    // it is trying to qualify, but a silent one lets the rig go on producing
+    // bursts the reader merges — which looks like a decode fault at the far end
+    // and gets debugged there, wrongly.
     static bool complained = false;
     if (silence < e450::MIN_SILENCE_MS && !complained) {
         complained = true;
         ESP_LOGE(TAG,
-                 "only %" PRId32 " ms of silence between telegrams, want >= %" PRId32 " ms: "
+                 "only %" PRId32 " ms of silence between emissions, want >= %" PRId32 " ms: "
                  "the reader ends a transmission after %" PRId32 " ms of quiet, so consecutive "
-                 "telegrams may be read as one. Raise SIM_PUSH_PERIOD_SECONDS.",
+                 "emissions may be read as one. Raise SIM_PUSH_PERIOD_SECONDS.",
                  silence, e450::MIN_SILENCE_MS, e450::DUT_BURST_TIMEOUT_MS);
     }
 }
@@ -184,102 +240,93 @@ void transmit_telegram() {
             g_clock.advance_ms(elapsed_ms);
         }
 
-        bool emit = false;
+        bool due = false;
+        e450::Mode mode = e450::Mode::E450;
         {
             Lock held;
             const e450::DateTime now = g_clock.now();
-            const bool on_boundary =
-                (now.second % PUSH_PERIOD_SECONDS == 0) && (now.second != last_emitted_second);
-            if (g_tx_pattern) {
-                // FR-CLI-07: `tx` owns the line for its whole duration —
-                // otherwise the pattern the operator is measuring has telegram
-                // bytes spliced into it, which is precisely the confusion the
-                // command exists to remove. Consume the boundary without
-                // emitting, so the pattern is not chased by a telegram in the
-                // same second: the reader needs a silent gap to decide that a
-                // transmission ended.
-                if (on_boundary) last_emitted_second = now.second;
-            } else if (g_burst_requested) {
-                // FR-SCH-05: a forced burst must not shift the schedule, so it
-                // deliberately does not touch last_emitted_second.
-                g_burst_requested = false;
-                emit = true;
-            } else if (on_boundary && !g_paused) {
+            mode = g_mode;
+            if ((now.second % PUSH_PERIOD_SECONDS == 0) && (now.second != last_emitted_second)) {
                 last_emitted_second = now.second;
-                emit = true;
-                // FR-SCH-03/04: integrate once per emission, and not at all
-                // while paused.
-                g_model.tick(PUSH_PERIOD_SECONDS * 1000);
+                due = true;
+
+                if (mode == e450::Mode::E450) {
+                    // FR-MOD-04, and the order matters. Choosing the load before
+                    // integrating means the energy this telegram reports is
+                    // exactly the power this telegram reports, multiplied by the
+                    // period — so a reader can check the arithmetic against a
+                    // single message, with no reference to what came before.
+                    e450::apply_random_load(g_model, g_rng);
+                    g_model.tick(PUSH_PERIOD_SECONDS * 1000);  // FR-SCH-03
+                }
             }
         }
 
-        if (emit) transmit_telegram();
+        if (due) emit(mode);
         vTaskDelay(pdMS_TO_TICKS(SCHEDULER_POLL_MS));
     }
 }
 
 // ------------------------------------------------------------------- console
 
+// FR-CLK-02. The clock is the only thing left to set: the load is no longer an
+// operator input at all, because each mode decides its own values (fixed in
+// mode 2, chosen by the seeded generator in mode 3). Setting the clock stays,
+// because a repeatable run needs a repeatable starting point.
 int cmd_set(int argc, char **argv) {
-    if (argc < 3) {
-        std::printf("ERR usage: set pi|po|pf|time <value>\n");
+    if (argc < 3 || std::strcmp(argv[1], "time") != 0) {
+        std::printf("ERR usage: set time <YYYY-MM-DDTHH:MM:SS>\n");
         return 1;
     }
-    const char *what = argv[1];
+
+    e450::DateTime dt;
+    unsigned year, month, day, hour, minute, second;
+    if (std::sscanf(argv[2], "%4u-%2u-%2uT%2u:%2u:%2u", &year, &month, &day, &hour, &minute,
+                    &second) != 6 ||
+        month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 ||
+        second > 59) {
+        std::printf("ERR expected YYYY-MM-DDTHH:MM:SS\n");
+        return 1;
+    }
+    dt.year = static_cast<uint16_t>(year);
+    dt.month = static_cast<uint8_t>(month);
+    dt.day = static_cast<uint8_t>(day);
+    dt.hour = static_cast<uint8_t>(hour);
+    dt.minute = static_cast<uint8_t>(minute);
+    dt.second = static_cast<uint8_t>(second);
+
     Lock held;
+    g_clock.set(dt);
+    std::printf("OK\n");
+    return 0;
+}
 
-    if (std::strcmp(what, "pi") == 0 || std::strcmp(what, "po") == 0) {
-        char *end = nullptr;
-        const long watts = std::strtol(argv[2], &end, 10);
-        if (end == argv[2] || *end != '\0' || watts < 0 || watts > 1'000'000) {
-            std::printf("ERR power must be 0..1000000 W\n");
-            return 1;
-        }
-        if (std::strcmp(what, "pi") == 0) {
-            g_model.set_import_w(static_cast<uint32_t>(watts));
-        } else {
-            g_model.set_export_w(static_cast<uint32_t>(watts));
-        }
-        std::printf("OK\n");
+// FR-MOD-01. With no argument it reports the current mode, so a script can read
+// the state it is about to change.
+int cmd_mode(int argc, char **argv) {
+    if (argc < 2) {
+        Lock held;
+        std::printf("OK %d %s\n", static_cast<int>(g_mode), mode_name(g_mode));
         return 0;
     }
 
-    if (std::strcmp(what, "pf") == 0) {
-        char *end = nullptr;
-        const float pf = std::strtof(argv[2], &end);
-        if (end == argv[2] || pf < 0.0F || pf > 1.0F) {
-            std::printf("ERR power factor must be 0.00..1.00\n");
-            return 1;
-        }
-        const bool lagging = (argc < 4) || (std::strcmp(argv[3], "leading") != 0);
-        g_model.set_power_factor(pf, lagging);
-        std::printf("OK\n");
-        return 0;
+    char *end = nullptr;
+    const long which = std::strtol(argv[1], &end, 10);
+    if (end == argv[1] || *end != 0 || which < 1 || which > 3) {
+        std::printf("ERR usage: mode [1|2|3]  (1 pattern, 2 simple, 3 e450)\n");
+        return 1;
     }
 
-    if (std::strcmp(what, "time") == 0) {
-        e450::DateTime dt;
-        unsigned year, month, day, hour, minute, second;
-        if (std::sscanf(argv[2], "%4u-%2u-%2uT%2u:%2u:%2u", &year, &month, &day, &hour, &minute,
-                        &second) != 6 ||
-            month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 ||
-            second > 59) {
-            std::printf("ERR expected YYYY-MM-DDTHH:MM:SS\n");
-            return 1;
-        }
-        dt.year = static_cast<uint16_t>(year);
-        dt.month = static_cast<uint8_t>(month);
-        dt.day = static_cast<uint8_t>(day);
-        dt.hour = static_cast<uint8_t>(hour);
-        dt.minute = static_cast<uint8_t>(minute);
-        dt.second = static_cast<uint8_t>(second);
-        g_clock.set(dt);
-        std::printf("OK\n");
-        return 0;
+    const auto mode = static_cast<e450::Mode>(which);
+    {
+        Lock held;
+        g_mode = mode;
     }
-
-    std::printf("ERR unknown field '%s'\n", what);
-    return 1;
+    // Takes effect at the next period boundary, not immediately: an emission
+    // already on the wire is left to finish, because truncating it would hand
+    // the reader a malformed frame and a fault that is not real.
+    std::printf("OK %ld %s\n", which, mode_name(mode));
+    return 0;
 }
 
 // FR-CLI-04: one machine-parsable line, so a test script can assert on it
@@ -292,36 +339,15 @@ int cmd_status(int, char **) {
     std::printf(
         "OK pi=%" PRIu32 " po=%" PRIu32 " pf=%.2f%s ei=%" PRIu32 " eo=%" PRIu32 " q1=%" PRIu32
         " q2=%" PRIu32 " q3=%" PRIu32 " q4=%" PRIu32 " i=%" PRIu32
-        " time=%04u-%02u-%02uT%02u:%02u:%02u paused=%d period=%d telegrams=%" PRIu32 "\n",
+        " time=%04u-%02u-%02uT%02u:%02u:%02u mode=%d/%s period=%d emissions=%" PRIu32 "\n",
         g_model.import_w(), g_model.export_w(), static_cast<double>(g_model.power_factor()),
         g_model.lagging() ? "" : "L", g_model.import_wh(), g_model.export_wh(),
         g_model.reactive_varh(e450::ValueModel::Q1_IMPORT_LAGGING),
         g_model.reactive_varh(e450::ValueModel::Q2_EXPORT_LAGGING),
         g_model.reactive_varh(e450::ValueModel::Q3_EXPORT_LEADING),
         g_model.reactive_varh(e450::ValueModel::Q4_IMPORT_LEADING), g_model.current_ma(), now.year,
-        now.month, now.day, now.hour, now.minute, now.second, g_paused ? 1 : 0,
-        PUSH_PERIOD_SECONDS, g_telegrams);
-    return 0;
-}
-
-int cmd_burst(int, char **) {
-    Lock held;
-    g_burst_requested = true;
-    std::printf("OK\n");
-    return 0;
-}
-
-int cmd_pause(int, char **) {
-    Lock held;
-    g_paused = true;
-    std::printf("OK\n");
-    return 0;
-}
-
-int cmd_resume(int, char **) {
-    Lock held;
-    g_paused = false;
-    std::printf("OK\n");
+        now.month, now.day, now.hour, now.minute, now.second, static_cast<int>(g_mode),
+        mode_name(g_mode), PUSH_PERIOD_SECONDS, g_emissions);
     return 0;
 }
 
@@ -331,59 +357,11 @@ struct CommandDef {
     esp_console_cmd_func_t func;
 };
 
-// FR-CLI-07. A continuous 0x55 pattern, which at 2400 8E1 is the densest edge
-// pattern the line can carry. Two uses, and the second is the one that earns it
-// a requirement: a scope sees seconds of unambiguous square wave rather than the
-// mostly-idle line a 1.6-s-in-5 telegram looks like, and a reader at the far end
-// reports back what the line settings actually are. Every byte 0x55 means they
-// match; a uniform 0xD5 is one inversion out; varying bytes are a wrong rate.
-// That is how FR-LNK-02 was settled.
-int cmd_tx(int argc, char **argv) {
-    long seconds = 5;
-    if (argc >= 2) {
-        char *end = nullptr;
-        seconds = std::strtol(argv[1], &end, 10);
-        if (end == argv[1] || *end != 0 || seconds < 1 || seconds > 30) {
-            std::printf("ERR usage: tx [1..30 seconds]\n");
-            return 1;
-        }
-    }
-
-    // 2400 baud, 11 bits per character: 218 characters per second.
-    const long total = seconds * 218;
-    uint8_t chunk[64];
-    std::memset(chunk, 0x55, sizeof(chunk));
-
-    // Silence the scheduler first and let any telegram already in flight finish,
-    // so the pattern starts on a clean line. g_tx_lock alone would only queue a
-    // telegram behind the pattern; the flag stops one being produced at all.
-    {
-        Lock held;
-        g_tx_pattern = true;
-    }
-    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
-    for (long sent = 0; sent < total; sent += static_cast<long>(sizeof(chunk))) {
-        uart_write_bytes(METER_UART, chunk, sizeof(chunk));
-    }
-    uart_wait_tx_done(METER_UART, portMAX_DELAY);
-    xSemaphoreGive(g_tx_lock);
-    {
-        Lock held;
-        g_tx_pattern = false;
-    }
-
-    std::printf("OK %ld bytes of 0x55 on GPIO%d\n", total, CONFIG_SIM_MBUS_TX_GPIO);
-    return 0;
-}
-
 void register_commands() {
     static constexpr CommandDef DEFS[] = {
-        {"set", "set pi|po <W> | pf <0..1> [leading] | time <YYYY-MM-DDTHH:MM:SS>", &cmd_set},
-        {"status", "print the whole model state as one key=value line", &cmd_status},
-        {"burst", "emit one telegram now, without disturbing the schedule", &cmd_burst},
-        {"pause", "stop emitting and stop integrating", &cmd_pause},
-        {"resume", "resume emitting", &cmd_resume},
-        {"tx", "tx [seconds] - hold the line and emit only 0x55, to check line settings", &cmd_tx},
+        {"mode", "mode [1|2|3] - 1 pattern, 2 simple telegram, 3 full E450", &cmd_mode},
+        {"status", "print the whole state as one key=value line", &cmd_status},
+        {"set", "set time <YYYY-MM-DDTHH:MM:SS>", &cmd_set},
     };
 
     // Zero-initialise and assign rather than brace-initialise: esp_console_cmd_t
@@ -425,8 +403,11 @@ extern "C" void app_main() {
 
     configure_meter_link();
 
-    ESP_LOGI(TAG, "E450 simulator: EBL Consumer Information 1, 13 objects, %d s, 2400 8E1%s",
-             PUSH_PERIOD_SECONDS, TX_INVERTED ? " inverted" : "");
+    ESP_LOGI(TAG, "E450 simulator: mode %d (%s), every %d s, 2400 8E1%s",
+             static_cast<int>(g_mode), mode_name(g_mode), PUSH_PERIOD_SECONDS,
+             TX_INVERTED ? " inverted" : "");
+    ESP_LOGI(TAG, "modes: 1 pattern (is there a signal?), 2 simple (can it decode?), "
+                  "3 e450 (can it decode the real thing?)");
 
     xTaskCreate(&scheduler_task, "scheduler", 6144, nullptr, 5, nullptr);
 

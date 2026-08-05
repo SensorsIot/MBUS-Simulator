@@ -1,0 +1,62 @@
+#pragma once
+
+#include <cstdint>
+#include <span>
+#include <vector>
+
+#include "e450/rng.h"
+#include "e450/telegram.h"
+#include "e450/value_model.h"
+
+namespace e450 {
+
+// The three things this simulator can put on the wire — FSD §13.
+//
+// They are a diagnostic ladder, not a feature list. Each mode adds exactly one
+// layer to the one below it, so the first one that fails names the fault:
+//
+//   Pattern  bytes, no protocol         does any signal reach the reader?
+//   Simple   one frame, real values     can the reader decode a telegram?
+//   E450     the full list, varying     can it decode *this meter's* telegrams?
+//
+// Between Simple and E450 lie the two things most likely to break a reader:
+// multi-block General Block Transfer reassembly, and values it has not seen
+// before. Running them in order separates "the line is wrong" from "the decoder
+// is wrong" from "the decoder cannot handle the real thing".
+enum class Mode : uint8_t {
+    Pattern = 1,
+    Simple = 2,
+    E450 = 3,
+};
+
+// Mode 1 — FR-MOD-02. A burst of 0x55 on the same cadence as a telegram, not a
+// continuous stream: the reader delimits a transmission by the silence after
+// it, so a stream it never sees the end of is one it never reports on. A burst
+// gets echoed back in its logs, which is the entire point of the mode.
+inline constexpr uint8_t PATTERN_BYTE = 0x55;
+inline constexpr std::size_t PATTERN_BURST_BYTES = 218;  // one second at 2400 8E1
+
+// Mode 2 — FR-MOD-03. The smallest thing that is still a real telegram: a push
+// setup and two registers, fixed values, one GBT block, one HDLC frame. Fixed
+// because the point is a known answer — anyone can check the reader against
+// these two numbers without reading a log from the simulator.
+namespace simple {
+
+inline constexpr std::size_t OBJECT_COUNT = 3;
+inline constexpr uint32_t ACTIVE_POWER_W = 777;
+inline constexpr uint32_t ACTIVE_ENERGY_WH = 12345;
+
+std::span<const CaptureObject> objects();
+std::vector<TelegramValue> values();
+
+}  // namespace simple
+
+// Mode 3 — FR-MOD-04. Choose the next load, then let the model integrate it.
+//
+// Called *before* the tick that integrates the period, so the energy reported
+// in a telegram is exactly the power reported in that same telegram multiplied
+// by the period. A reader can check the arithmetic against itself, with no
+// reference to what came before.
+void apply_random_load(ValueModel &model, Rng &rng);
+
+}  // namespace e450

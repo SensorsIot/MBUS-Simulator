@@ -14,11 +14,19 @@ kind installed by EBL Liestal. Every five seconds it sends out a reading —
 power, energy, reactive energy and current — exactly as the real meter would, so
 you can develop and test a meter reader without having a meter.
 
-**You tell it what the household is doing; it behaves accordingly.** Ask for a
-2300 W load and the reader will show 2300 W, and its energy counter will climb
-by 3.2 Wh every five seconds — because the simulator integrates the power you
-set, rather than replaying a recording. If the reader gets the arithmetic wrong,
-you find out.
+**It has three modes, and they are a ladder.** Each one is harder for a reader
+than the one below, so the first that fails tells you where the problem is:
+
+| Mode | What it sends | What it tells you |
+|---|---|---|
+| **1** | A plain test pattern | Whether any signal is arriving at all |
+| **2** | One small reading, always the same numbers | Whether the reader can decode anything |
+| **3** | The real thing, values changing every time | Whether it can decode a real meter |
+
+Mode 3 is the default and the one you will normally use. Its values change on
+every reading, deliberately: a reader cannot pass by remembering a number, it
+has to decode each message. Energy still follows power exactly, so if the reader
+gets the arithmetic wrong, you find out.
 
 You control it by typing commands on a serial console. There is no app, no web
 page and no WiFi.
@@ -97,7 +105,8 @@ Open the console (4.1) and reset the board. It says what it is:
 
 ```
 I (203) app_init: Project name:     MBUS-Simulator
-I (285) sim: E450 simulator: EBL Consumer Information 1, 13 objects, 5 s, 2400 8E1
+I (285) sim: E450 simulator: mode 3 (e450), every 5 s, 2400 8E1
+I (285) sim: modes: 1 pattern (is there a signal?), 2 simple (can it decode?), 3 e450 (…)
 ```
 
 If that banner names something else, the board is running other firmware and
@@ -123,73 +132,84 @@ picocom -b 115200 rfc2217://192.168.0.27:4003
 
 ### 4.2 A first session
 
-Simulate a 2.3 kW load and watch the reader follow it:
+The simulator starts in mode 3 and is already sending. Watch the console:
 
 ```
-sim> set pi 2300
-OK
 sim> status
-OK pi=2300 po=0 pf=1.00 ei=0 eo=0 q1=0 q2=0 q3=0 q4=0 i=3333 …
+OK pi=4820 po=0 pf=0.93 ei=27 eo=0 … mode=3/e450 period=5 emissions=6
 ```
 
-Within five seconds the reader should report **2300 W**, and its import energy
-counter should rise by about 3.2 Wh per reading. That is the basic round trip —
-if it works, everything downstream of the simulator is fine.
+Every five seconds it logs what it sent:
+
+```
+I sim: e450 7: 381 bytes on GPIO17, 1747 ms on the wire, 3253 ms silent - pi=4820 po=0 ei=27 eo=0 i=6985
+```
+
+**Compare that line against what your reader reports.** They should agree — same
+power, same energy. That is the whole test, and because mode 3's values change
+every time, agreement means the reader really decoded the message.
+
+If they do not agree, drop down the ladder:
+
+```
+sim> mode 2
+OK 2 simple
+```
+
+Mode 2 sends the same two numbers every time — **777 W** and **12345 Wh**. If the
+reader shows those, it can decode; the problem is with the full E450 telegram.
+If it shows nothing, go to `mode 1` and chapter 5.2.
 
 ### 4.3 Commands
 
 | Command | What it does |
 |---|---|
-| `set pi <watts>` | Power being **consumed** — the normal case |
-| `set po <watts>` | Power being **fed back**, e.g. from solar |
-| `set pf <0.00–1.00> [leading]` | Power factor. Inductive unless you say `leading` |
-| `set time <YYYY-MM-DDTHH:MM:SS>` | Move the clock |
+| `mode` | Say which mode is running |
+| `mode 1` | Test pattern — is a signal arriving? |
+| `mode 2` | Small fixed reading — can the reader decode? |
+| `mode 3` | Full E450, changing values — can it decode the real thing? |
 | `status` | Show everything, on one line |
-| `burst` | Send one reading immediately |
-| `pause` / `resume` | Stop and restart sending |
-| `tx [seconds]` | Send a test pattern instead of readings — see 5.2 |
+| `set time <YYYY-MM-DDTHH:MM:SS>` | Move the clock |
 | `help` | List the commands |
 
-Every command answers `OK` or `ERR …` on a single line. `ERR` changes nothing.
+Every command answers `OK` or `ERR …` on a single line. A mode change takes
+effect at the next reading, so a message already going out is never cut short.
+
+There is no command to set the power: each mode decides its own values. That is
+what makes a test result mean something — you compare the reader against the
+simulator's own log, not against a number you typed.
 
 ### 4.4 Reading `status`
 
 ```
-OK pi=2300 po=0 pf=1.00 ei=0 eo=0 q1=0 q2=0 q3=0 q4=0 i=3333
-   time=2026-01-01T00:00:28 paused=0 period=5 telegrams=6
+OK pi=4820 po=0 pf=0.93 ei=27 eo=0 q1=3 q2=0 q3=0 q4=0 i=6985
+   time=2026-01-01T00:00:28 mode=3/e450 period=5 emissions=6
 ```
 
-**Three fields are what you asked for; the rest are what follows from it.**
-
-| You set | |
+| Field | Meaning |
 |---|---|
-| `pi` / `po` | Consumed / fed-back power, W |
-| `pf` | Power factor; a trailing `L` as in `pf=0.90L` means leading |
-
-| It works out | |
-|---|---|
+| `pi` / `po` | Power being consumed / fed back, W |
+| `pf` | Power factor; a trailing `L` as in `0.90L` means leading |
 | `ei` / `eo` | Energy consumed / fed back, Wh — the running totals |
-| `q1`…`q4` | Reactive energy, varh. All four stay at 0 while `pf` is 1.00 |
+| `q1`…`q4` | Reactive energy, varh. All zero while `pf` is 1.00 |
 | `i` | Current, mA — worked out from the power, not measured |
-| `telegrams` | Readings sent since power-on |
-
-| Housekeeping | |
-|---|---|
 | `time` | The clock |
-| `paused` | 1 if you have paused it |
+| `mode` | Which of the three modes is running |
 | `period` | Seconds between readings |
+| `emissions` | Readings sent since power-on |
 
 Two things that look wrong and are not:
 
-- **`ei` can sit at 0 while power flows.** Energy accrues from the power set *at
-  the time*, so it counts from when you set the load, not before.
-- **`ei` steps unevenly** — 1, 3, 5, 6, 8, 10. It shows whole watt-hours while
-  counting in fractions, so a steady load gives uneven-looking steps. Nothing is
-  lost; see FSD FR-MDL-04.
+- **`ei` steps unevenly** — 1, 3, 5, 6, 8. It shows whole watt-hours while
+  counting in fractions, so even a steady load looks uneven. Nothing is lost;
+  see FSD FR-MDL-04.
+- **In mode 2, `status` does not match what is sent.** Mode 2 sends its own fixed
+  numbers and ignores the model, so read the console log line, not `status`.
 
 **The clock starts from a fixed date, not today's.** That is on purpose: the same
-test run twice produces identical output, which is impossible with a real clock.
-`set time` moves it.
+run twice produces identical output, which is impossible with a real clock — and
+it is also why mode 3's "random" values are the same random values every time
+you reboot. `set time` moves the clock.
 
 ---
 
@@ -203,29 +223,27 @@ you where the problem is.
 Watch the console. A line appears every five seconds:
 
 ```
-I (32082) sim: telegram 6: 381 bytes on GPIO17, 1747 ms on the wire, 3253 ms silent
+I (32082) sim: e450 6: 381 bytes on GPIO17, 1747 ms on the wire, 3253 ms silent - pi=…
 ```
 
 - **It appears** → the simulator is fine; the problem is the wiring, the
   interface board, or the reader. Go to 5.2.
-- **It does not** → check `status` for `paused=1`, then re-check the banner
-  (3.3). A board running different firmware looks exactly like a broken one.
+- **It does not** → re-check the banner (3.3). A board running different
+  firmware looks exactly like a broken one.
 
 ### 5.2 Is the signal getting through correctly?
 
-`tx` sends a plain test pattern — the byte `0x55`, which is just alternating
+Mode 1 sends a plain test pattern — the byte `0x55`, which is just alternating
 bits — instead of readings. Nothing complicated has to be right for it to mean
 something, which is why it is the fastest way to find a wiring or settings
 fault.
 
 ```
-sim> pause
-sim> tx 5
-OK 1090 bytes of 0x55 on GPIO17
-sim> resume
+sim> mode 1
+OK 1 pattern
 ```
 
-Now look at what your reader received:
+Now look at what your reader received, then `mode 3` to put it back:
 
 | It received | What is wrong |
 |---|---|
@@ -239,7 +257,10 @@ signal, not interference. The reasoning is in FSD FR-LNK-02.
 
 ### 5.3 The reader gets data but cannot read it
 
-Check the **`ms silent`** figure on the console line above. Readers decide a
+Try `mode 2` first — if its two fixed numbers come through and mode 3's do not,
+the reader cannot reassemble a telegram split across several frames, and that is
+the fault. If neither works, check the **`ms silent`** figure on the console line
+above. Readers decide a
 transmission has finished when the line goes quiet for about two seconds, so
 that number needs to stay comfortably above 2000. If you have shortened the
 period it may not be. The simulator prints an error line of its own when this

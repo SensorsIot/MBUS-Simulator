@@ -44,6 +44,17 @@ struct TelegramSpec {
     std::span<const TelegramValue> values;  // exactly one per object
     uint32_t invoke_id = 0;
     DateTime timestamp{};
+
+    // Both members are *views*, not storage, and whatever they point at has to
+    // outlive the encode call. The object list is static, so it is safe; the
+    // values are built per telegram and are not.
+    //
+    // Assigning a temporary vector compiles, dangles, and produces a telegram
+    // built from freed memory — which on a device shows up as an occasional
+    // malformed frame at 2400 baud, days later. Bind through here instead: the
+    // rvalue overload is deleted, so the mistake is a compile error.
+    void bind_values(const std::vector<TelegramValue> &owned) { values = owned; }
+    void bind_values(std::vector<TelegramValue> &&) = delete;
 };
 
 // Wire-layer constants. Every default was measured from e450_serial8.hex and

@@ -8,10 +8,15 @@
 | **Complexity** | Low–Medium — one protocol, one output pin, no network |
 | **Provenance legend** | `[user]` decided in the design interview · `[derived]` follows from another requirement · `[capture]` measured from a real E450 telegram · `[doc:EBL]` EBL Liestal parametrisation · `[doc:LG]` Landis+Gyr *Standard CIP-Liste*, 16 Sep 2024 · `[doc:DUT]` the reader's stated line and framing expectations · `[measured]` established on the bench, against the behaviour it describes |
 
-> **Plane note.** This project deliberately carries the **WHAT plane only** — no
-> Harness and no UserDocumentation. It is a bench instrument with no end user and
-> no field deployment; the operating instructions are §8's twelve console
-> commands. `[user]`
+> **Plane note.** WHAT (this document) and OPERATE
+> ([the manual](../UserDocumentation/MBUS-Simulator-Manual.md)) exist; there is no
+> Harness plane. The manual was added once the console surface became small
+> enough to describe to someone who did not build the rig — three modes, in
+> §13. `[user]`
+>
+> **Chapter numbers are stable, so they are not in reading order.** §13 is the
+> newest chapter and sits in Part A where it belongs by layer, rather than being
+> numbered to match its position.
 
 ---
 
@@ -44,7 +49,8 @@ or from a `WorkbenchDriver` test script.
    v2.1.0 decodes without error.
 2. Emit **self-consistent** power and energy: the energy counters are the
    integral of the transmitted power.
-3. Be **steerable at runtime** — set a load, observe what the DUT reports.
+3. Be **steerable at runtime** — pick one of three modes (§13) and observe what the
+   DUT reports.
 4. Be **deterministic** — the same commands produce the same bytes.
 
 ### 1.5 Non-goals
@@ -55,8 +61,10 @@ accuracy, no metrological claim, and no relationship to any real installation.
 ### 1.6 System flow
 
 ```
-console CLI ──► value model ──► push scheduler ──► telegram encoder ──► UART2
- (set pi …)     P, E, I, Q       every 5 s          DataNotification      2400 8E1
+console CLI ──► mode (§13) ──► push scheduler ──► telegram encoder ──► UART2
+ (mode 1|2|3)   1 pattern         every 5 s          DataNotification      2400 8E1
+                2 fixed values
+                3 random load
                                                     → GBT → HDLC          TX not inverted
                                                                           GPIO17
                                                                              │
@@ -96,9 +104,9 @@ above it is portable C++ that compiles on a Linux host.
 
 | Layer | Components | Chapter |
 |---|---|---|
-| **L2 Application** | Meter value model · Push scheduler | §5, §6 |
+| **L2 Application** | Meter value model · Push scheduler · Operating modes | §5, §6, §13 |
 | **L1 Interfaces** | Telegram encoder (A-XDR → DataNotification → GBT → HDLC) · Control console | §7, §8 |
-| **L0 Foundation** | Meter link transport · Synthetic clock · DUT power | §9, §10, §11 |
+| **L0 Foundation** | Meter link transport · Synthetic clock | §9, §10 |
 
 ```
 components/e450_core/     L1+L2, zero ESP-IDF, builds for host and target
@@ -123,15 +131,15 @@ values equal the model. No ESP32 involved. **Exit:** `ctest` green in CI.
 ### 3.2 Phase 2 — Bytes on the wire
 
 Firmware on the ESP32, UART2 configured at the polarity FR-LNK-02 fixes, console
-live. **Exit:** `tx 10` reads back as `0x55` at the far end (FR-CLI-07), and a
+live. **Exit:** `mode 1` reads back as `0x55` at the far end (FR-MOD-02), and a
 logic analyser or a second ESP32 receives the same bytes the host test produced,
 with no framing or parity errors.
 
 ### 3.3 Phase 3 — Against the DUT
 
-Simulator drives a real gPlug through the interface, powering it. **Exit:**
-`set pi 1500` is followed by the gPlug reporting 1.5 kW, and the energy the gPlug
-reports rises at 1.5 kWh/h ±1 %.
+Simulator drives a real reader through the interface. **Exit:** all three modes
+behave as §13 requires — the reader echoes the pattern, decodes the fixed values
+of mode 2, and tracks mode 3's changing load telegram by telegram.
 
 ---
 
@@ -199,7 +207,7 @@ makes the simulator falsifiable rather than merely plausible.
 | **FR-MDL-05** | Must | On each scheduler tick of Δt seconds the model shall add `P × Δt × 1000` mWs to the import accumulator and `P_export × Δt × 1000` to the export accumulator. | `[derived]` |
 | **FR-MDL-06** | Must | All accumulators shall be zero at boot. | `[user]` |
 | **FR-MDL-07** | Must | Phase currents `1-0:31.7.0`, `51.7.0`, `71.7.0` shall be derived as `I_mA = (P_import + P_export) × 1000 / (3 × 230)`, identical on all three phases. | `[user]` A-02 |
-| **FR-MDL-08** | Should | Reactive power shall be derived as `Q = P × tan(arccos(pf))` from a settable power factor, default 1.00, and routed to exactly one of the four quadrant accumulators by the signs of P and Q. | `[user]` |
+| **FR-MDL-08** | Should | Reactive power shall be derived as `Q = P × tan(arccos(pf))` from the power factor the active mode selects, and routed to exactly one of the four quadrant accumulators by the signs of P and Q. | `[user]` |
 | **FR-MDL-09** | Must | With `pf = 1.00`, all four reactive accumulators shall hold at their current value. | `[derived]` |
 | **FR-MDL-10** | Must | Setting export power shall never decrease the import accumulator. | `[user]` |
 
@@ -229,8 +237,8 @@ schedules; **v1 implements Consumer Information 1 (the 5 s list) only** `[user]`
 | **FR-SCH-01** | Must | The scheduler shall emit one telegram whenever the synthetic clock's seconds field is divisible by the push period, which shall default to **5 s** and shall divide 60. | `[doc:LG]` §3.1 |
 | **FR-SCH-02** | Must | The telegram shall carry the 13 objects of Appendix A, in the listed order. | `[doc:EBL]` |
 | **FR-SCH-03** | Must | The scheduler shall integrate the value model (FR-MDL-05) once per emission, using the elapsed time since the previous emission. | `[derived]` |
-| **FR-SCH-04** | Must | Emission shall be suppressed while paused, and integration shall be suppressed with it. | `[derived]` |
-| **FR-SCH-05** | Must | An emission forced by `burst` shall not disturb the periodic schedule. | `[user]` |
+| **FR-SCH-04** | ~~Must~~ | `deprecated` 2026-08-05 — emission shall be suppressed while paused. There is no paused state: the simulator always emits, and *what* it emits is the mode. | `[derived]` |
+| **FR-SCH-05** | ~~Must~~ | `deprecated` 2026-08-05 — `burst` is removed. Every mode emits on the same period, so a forced emission has nothing left to disturb. | `[user]` |
 | **FR-SCH-06** | Must | If a telegram is still transmitting when the next tick falls due, the scheduler shall queue the new telegram and transmit it on completion, never interleaving two telegrams on the line. | `[derived]` |
 | **FR-SCH-07** | Should | The architecture shall admit additional push setups with independent object lists and schedules without altering §7. | `[user]` |
 | **FR-SCH-08** | Must | Between the last byte of one telegram and the first byte of the next the line shall be silent for at least **3000 ms**, and never less than the 2000 ms in which the DUT declares a transmission ended. | `[doc:DUT]` |
@@ -269,6 +277,68 @@ schedules; **v1 implements Consumer Information 1 (the 5 s list) only** `[user]`
 | FR-SCH-06 | Force two emissions 100 ms apart | Second follows the first intact | Bytes of the two interleaved | target |
 | FR-SCH-08 | Encode the CI1 telegram; compute the gap at a 5 s period | ≥ 3000 ms silent | Any gap under 2000 ms; a size that varies with model state | host |
 | FR-SCH-08 | Run ≥ 6 consecutive cycles against the DUT | Each cycle decoded separately, same object count every time | Two cycles merged into one; a cycle byte count above one telegram's | bench |
+
+---
+
+## 13. Operating Modes
+
+### 13.1 Purpose
+
+Three things this simulator can put on the wire, chosen by one console command.
+
+They are a **diagnostic ladder, not a feature list**: each mode adds exactly one
+layer to the one below, so the first that fails names the fault. `[user]`
+
+| Mode | On the wire | Answers |
+|---|---|---|
+| **1 pattern** | `0x55`, no protocol | Does any signal reach the reader, at the right line settings? |
+| **2 simple** | One frame, three objects, fixed values | Can the reader decode a telegram at all? |
+| **3 e450** | The full 13-object list, values changing every emission | Can it decode *this meter's* telegrams? |
+
+Between 2 and 3 lie the two things most likely to defeat a reader: multi-block
+General Block Transfer reassembly, and values it has not seen before. Running
+them in order separates *the line is wrong* from *the decoder is wrong* from
+*the decoder cannot handle the real thing*. `[derived]`
+
+### 13.2 Requirements
+
+| ID | Pri | Requirement | Provenance |
+|---|---|---|---|
+| **FR-MOD-01** | Must | The device shall be in exactly one of three modes, selected by `mode <1|2|3>`, defaulting to **3** at boot, and a change shall take effect at the next period boundary rather than interrupting an emission in progress. | `[user]` |
+| **FR-MOD-02** | Must | Mode 1 shall emit a burst of `0x55` on every period boundary, of a length that leaves the FR-SCH-08 silence, rather than a continuous stream. | `[user]` |
+| **FR-MOD-03** | Must | Mode 2 shall emit a telegram of one push-setup object and two registers with **fixed** values, occupying exactly one GBT block and one HDLC frame. | `[user]` |
+| **FR-MOD-04** | Must | Mode 3 shall emit the Appendix A list with a load chosen per emission by a generator seeded identically at every boot, and shall choose that load **before** integrating the period, so the energy in a telegram equals the power in that same telegram times the period. | `[user]` |
+| **FR-MOD-05** | Must | Every emission shall be logged on the console with its mode and the values it carried. | `[derived]` |
+
+> **Why mode 1 bursts rather than streams.** A reader delimits a transmission by
+> the silence that follows it, so a stream it never sees the end of is a stream it
+> never reports on — the operator learns nothing, which defeats the mode. One
+> second of pattern on the 5 s schedule gets echoed back in the reader's log,
+> which is the entire point. `[derived]`
+
+> **Why mode 2's values are fixed and mode 3's are not.** They are being used for
+> opposite purposes. Mode 2 is a *known answer*: anyone can check the reader
+> against 777 W and 12 345 Wh without consulting the simulator. Mode 3 is a
+> *challenge*: values that change every emission are what stop a reader passing
+> by caching a constant or guessing, so it must genuinely decode each message —
+> which is why FR-MOD-05 requires the simulator to record what it sent. `[user]`
+
+> **Random, but replayable.** FR-CLK-04 requires two runs from reset to produce
+> identical bytes, and mode 3 varies its values. Both hold because the generator
+> is seeded from a constant: unpredictable to the reader, reproducible for us.
+> `[derived]`
+
+### 13.3 Verification contracts
+
+| ID | Precondition · stimulus | Expected | **Prohibited** | Tier |
+|---|---|---|---|---|
+| FR-MOD-01 | `mode 2` mid-emission | Current emission completes intact; next is mode 2 | A truncated frame at the switch | bench |
+| FR-MOD-02 | `mode 1`, reader capturing | Every byte received is `0x55`, once per period | A continuous stream the reader never delimits | bench |
+| FR-MOD-03 | Encode mode 2; count `7E A0` openings; decode | Exactly 1 frame; 777 W and 12 345 Wh | More than one frame; any decode failure | host |
+| FR-MOD-04 | 50 draws from the seeded generator | >25 distinct loads; import and export never both non-zero | A constant; both directions at once | host |
+| FR-MOD-04 | Two runs from reset, same seed | Identical load sequence | Any divergence | host |
+| FR-MOD-04 | 12 emissions; compare energy to Σ(P × period) | Equal | Energy that does not match the powers reported | host |
+| FR-MOD-05 | Any emission | Console line names mode and values | A mode-3 emission whose values are unrecorded | bench |
 
 ---
 
@@ -334,12 +404,12 @@ on. `[user]`
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
 | **FR-CLI-01** | Must | The device shall expose a line-based console on UART0 at 115200 8N1. | `[user]` |
-| **FR-CLI-02** | Must | The console shall implement: `set pi <W>`, `set po <W>`, `set pf <0.00-1.00>`, `set time <ISO-8601>`, `status`, `burst`, `pause`, `resume`, `tx [seconds]`, `help`. | `[user]` |
+| **FR-CLI-02** | Must | The console shall implement: `mode [1|2|3]`, `status`, `set time <ISO-8601>`, `help`. | `[user]` |
 | **FR-CLI-03** | Must | Every command shall reply on one line, beginning `OK` or `ERR `, before any further output. | `[derived]` |
-| **FR-CLI-04** | Must | `status` shall print the complete model state — both powers, power factor, all accumulators in Wh, clock, paused flag, push period, telegram count — as one `key=value` line. | `[derived]` |
+| **FR-CLI-04** | Must | `status` shall print the complete state — both powers, power factor, all accumulators in Wh, clock, current mode, push period, emission count — as one `key=value` line. | `[derived]` |
 | **FR-CLI-05** | Must | A malformed or out-of-range argument shall leave the model unchanged and reply `ERR`. | `[derived]` |
 | **FR-CLI-06** | Must | Console output shall never be written to UART2. | `[derived]` |
-| **FR-CLI-07** | Must | `tx [seconds]` shall emit `0x55` continuously on the meter link for 1–30 s (default 5), suppressing the scheduler for the duration so nothing else reaches the line, and shall reply with the byte count and GPIO. | `[user]` |
+| **FR-CLI-07** | ~~Must~~ | `superseded` 2026-08-05 by **FR-MOD-02** — `tx [seconds]` shall emit `0x55` on the meter link. The pattern is now a mode rather than a one-shot command, so it repeats on the schedule and needs no `pause` around it. | `[user]` |
 
 > **Why a requirement for a test pattern.** `0x55` alternates every bit, so it
 > separates the line settings from everything layered on top: no framing, no

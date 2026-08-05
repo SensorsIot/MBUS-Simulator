@@ -12,6 +12,8 @@
 
 #include <dlms_parser/dlms_parser.h>
 #include <e450/ebl_ci1.h>
+#include <e450/modes.h>
+#include <e450/rng.h>
 #include <e450/telegram.h>
 #include <e450/value_model.h>
 
@@ -343,6 +345,87 @@ void case_silence() {
     check(e450::wire_time_ms(0) == 0, "no bytes, no time");
 }
 
+// FR-MOD-03 — mode 2 decodes, and fits in one HDLC frame.
+//
+// The frame count is the property that makes this mode worth having. Mode 3
+// spans three frames and needs multi-block GBT reassembly; if mode 2 decodes and
+// mode 3 does not, the reader's reassembly is the fault and nothing else is.
+// That inference only holds while mode 2 really is a single frame, so it is
+// asserted rather than assumed.
+void case_mode_simple() {
+    const std::vector<e450::TelegramValue> fixed = e450::simple::values();
+    e450::TelegramSpec spec;
+    spec.objects = e450::simple::objects();
+    spec.bind_values(fixed);
+    spec.invoke_id = 1;
+    spec.timestamp = e450::DateTime{};
+
+    const std::vector<uint8_t> wire = e450::encode_telegram(spec);
+
+    std::size_t frames = 0;
+    for (std::size_t i = 0; i + 1 < wire.size(); ++i) {
+        if (wire[i] == 0x7E && wire[i + 1] == 0xA0) ++frames;
+    }
+    std::printf("  %zu bytes, %zu frame(s)\n", wire.size(), frames);
+    check(frames == 1, "mode 2 is a single HDLC frame");
+
+    std::size_t count = 0;
+    const std::map<std::string, double> values = decode(wire, &count);
+    check(count > 0, "parser reported no matched objects");
+    check_eq(at(values, OBIS_P_IMPORT), e450::simple::ACTIVE_POWER_W, "fixed active power");
+    check_eq(at(values, OBIS_E_IMPORT), e450::simple::ACTIVE_ENERGY_WH, "fixed active energy");
+}
+
+// FR-MOD-04 — mode 3 varies, stays physically consistent, and repeats exactly.
+void case_mode_random() {
+    // Repeatable: the same seed must give the same load sequence, or FR-CLK-04
+    // (two runs, identical bytes) cannot hold once mode 3 is the default.
+    e450::Rng a{e450::MODE3_SEED};
+    e450::Rng b{e450::MODE3_SEED};
+    e450::ValueModel first;
+    e450::ValueModel second;
+    for (int i = 0; i < 20; ++i) {
+        e450::apply_random_load(first, a);
+        e450::apply_random_load(second, b);
+        check(first.import_w() == second.import_w() && first.export_w() == second.export_w(),
+              "same seed, same sequence");
+    }
+
+    // Varies: a mode whose whole purpose is to stop a reader passing on a
+    // constant must not itself emit a constant.
+    e450::Rng rng{e450::MODE3_SEED};
+    e450::ValueModel model;
+    std::map<uint32_t, int> seen;
+    for (int i = 0; i < 50; ++i) {
+        e450::apply_random_load(model, rng);
+        seen[model.import_w() + model.export_w()]++;
+    }
+    std::printf("  %zu distinct loads in 50 draws\n", seen.size());
+    check(seen.size() > 25, "mode 3 values actually vary");
+
+    // Consistent: the load is chosen before the period is integrated, so the
+    // energy a telegram reports is exactly the power it reports times the
+    // period. This is the arithmetic a reader can be checked against.
+    e450::Rng rng2{e450::MODE3_SEED};
+    e450::ValueModel m2;
+    uint32_t expected_mwh_s = 0;
+    for (int i = 0; i < 12; ++i) {
+        e450::apply_random_load(m2, rng2);
+        m2.tick(5000);
+        expected_mwh_s += m2.import_w() * 5000;
+    }
+    check_eq(m2.import_wh(), expected_mwh_s / 3'600'000u, "energy is the integral of the load");
+
+    // Import and export never both flow: a real meter measures one direction at
+    // a time, and a reader is entitled to assume it.
+    e450::Rng rng3{e450::MODE3_SEED};
+    e450::ValueModel m3;
+    for (int i = 0; i < 100; ++i) {
+        e450::apply_random_load(m3, rng3);
+        check(m3.import_w() == 0 || m3.export_w() == 0, "only one direction at a time");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -364,6 +447,8 @@ int main(int argc, char **argv) {
     else if (name == "monotonic") case_monotonic();
     else if (name == "determinism") case_determinism();
     else if (name == "silence") case_silence();
+    else if (name == "mode_simple") case_mode_simple();
+    else if (name == "mode_random") case_mode_random();
     else {
         std::fprintf(stderr, "unknown case: %s\n", name.c_str());
         return 2;

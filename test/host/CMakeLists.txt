@@ -57,3 +57,5 @@ add_test(NAME FR-MDL-09.unity-pf-holds-reactive     COMMAND test_encode reactive
 add_test(NAME FR-MDL-10.counters-monotonic          COMMAND test_encode monotonic)
 add_test(NAME FR-CLK-04.same-input-same-bytes       COMMAND test_encode determinism)
 add_test(NAME FR-SCH-08.telegram-leaves-a-gap       COMMAND test_encode silence)
+add_test(NAME FR-MOD-03.simple-mode-one-frame       COMMAND test_encode mode_simple)
+add_test(NAME FR-MOD-04.random-mode-varies-repeats  COMMAND test_encode mode_random)
