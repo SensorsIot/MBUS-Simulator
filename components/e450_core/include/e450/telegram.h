@@ -46,7 +46,7 @@ struct TelegramValue {
     }
 
     // COSEM scaler_unit: structure[2] { integer8 scaler, enum unit }. The value
-    // a reader should report is `raw x 10^scaler`, applied once.
+    // a decoder should report is `raw x 10^scaler`, applied once.
     static TelegramValue scaler_unit(int8_t scaler, uint8_t unit) {
         return raw({0x02, 0x02, 0x0F, static_cast<uint8_t>(scaler), 0x16, unit});
     }
