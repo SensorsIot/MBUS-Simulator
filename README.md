@@ -43,6 +43,7 @@ components/e450_core/   Portable C++: A-XDR, DataNotification, GBT, HDLC, value 
 main/                   ESP32 shell: UART, console, scheduler, clock, DUT power.  (Phase 2)
 test/host/              Host tests: decode our own output with the DUT's decoder.
 docs/Functionality/     The FSD — what it must do and how that is demonstrated.
+docs/UserDocumentation/ The operator's manual — how to install, run and diagnose it.
 ```
 
 ## Testing
@@ -80,8 +81,13 @@ toolchain to this devcontainer.
 
 ## Documentation
 
+**To operate the rig**, read
+[`docs/UserDocumentation/MBUS-Simulator-Manual.md`](docs/UserDocumentation/MBUS-Simulator-Manual.md)
+— installation, wiring, the console reference, what a healthy log looks like, and
+a diagnostic chapter that starts with the ten-second `tx` test for line settings.
+
 [`docs/Functionality/MBUS-Simulator-FSD.md`](docs/Functionality/MBUS-Simulator-FSD.md)
-is the contract: 44 requirements, each with a verification contract naming the
+is the contract: 50 requirements, each with a verification contract naming the
 outcome that would falsify it. `docs/Standard CIP-Liste_DE.pdf` is Landis+Gyr's
 public Swiss customer-interface specification; note that EBL's parametrisation
 differs from that standard list in both directions, and EBL's wins here.
