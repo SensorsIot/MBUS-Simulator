@@ -88,10 +88,11 @@ toolchain to this devcontainer.
 **To operate the rig**, read
 [`docs/UserDocumentation/MBUS-Simulator-Manual.md`](docs/UserDocumentation/MBUS-Simulator-Manual.md)
 — installation, wiring, the console reference, what a healthy log looks like, and
-a diagnostic chapter that walks down the three modes to localise a fault.
+a diagnostic chapter that walks down the three modes to localise a fault, and the
+runtime directives that provoke faults deliberately.
 
 [`docs/Functionality/MBUS-Simulator-FSD.md`](docs/Functionality/MBUS-Simulator-FSD.md)
-is the contract: 55 requirements, each with a verification contract naming the
+is the contract: 70 requirements, each with a verification contract naming the
 outcome that would falsify it. `docs/Standard CIP-Liste_DE.pdf` is Landis+Gyr's
 public Swiss customer-interface specification; note that EBL's parametrisation
 differs from that standard list in both directions, and EBL's wins here.

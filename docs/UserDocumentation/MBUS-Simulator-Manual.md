@@ -32,7 +32,7 @@ You control it by typing commands on a serial console. There is no app, no web
 page and no WiFi.
 
 What it does **not** do: it is not a meter, measures nothing, and has no
-metrological standing. See chapter 6 for the limits that matter in practice.
+metrological standing. See chapter 8 for the limits that matter in practice.
 
 ---
 
@@ -277,9 +277,107 @@ simulator is idle. That needs a meter on the wire; the console cannot tell you.
 
 ---
 
-## 6. Settings
+## 6. Making it misbehave on purpose
 
-Changed before building, under **MBUS Simulator** in `idf.py menuconfig`.
+Chapters 4 and 5 cover a meter that is working. This one is for testing what
+happens when it is not: a corrupted checksum, a missing piece, silence. All of
+it is typed at the console — nothing here needs a rebuild.
+
+### 6.1 Faults
+
+**A fault applies to the next reading only, then clears itself.** That is
+deliberate: a corruption left switched on quietly spoils every test that comes
+after it. Arm one, watch one reading, move on.
+
+```
+sim> fault fcs 2
+OK fcs:2 armed for the next telegram
+```
+
+| Command | What it sends |
+|---|---|
+| `fault fcs <n>` | Reading whose frame *n* has a wrong checksum, everything else intact |
+| `fault truncate <n>` | Frame *n* cut off in the middle, with no ending |
+| `fault drop-block <k>` | Reading with piece *k* missing entirely |
+| `fault start-mid-frame` | Starts transmitting halfway through the first frame |
+| `fault duplicate-register <obis>` | One reading containing the same value twice, with different numbers |
+| `fault noise <n>` | *n* bytes of rubbish instead of a reading |
+| `fault none` | Disarm |
+| `fault` | Say what is armed |
+
+OBIS codes are typed the way a decoder prints them: `fault duplicate-register
+1.1.1.8.0.255`.
+
+**Faulted readings always carry the same fixed numbers**, never mode 3's
+changing ones — otherwise you could not say what the correct answer was supposed
+to be.
+
+### 6.2 Timing
+
+```
+sim> gap 2000
+OK gap=2000 (free-running)
+sim> silence 30
+OK silent for 30 s
+```
+
+`gap <ms>` sets the quiet time between readings exactly, which is how you test a
+receiver's cut-off — try 1999, 2000 and 2001. It replaces the normal five-second
+schedule until you set `gap 0`.
+
+`silence <seconds>` stops transmission altogether for a while. Everything else
+keeps running: the clock advances, the console answers, and it starts again on
+its own.
+
+### 6.3 Changing what the reading contains
+
+| Command | Effect |
+|---|---|
+| `identity ldn` / `devid` / `none` | Which identity object the reading carries, if any |
+| `serial 8` / `serial 16` | How long the serial number is |
+| `energy <wh>` / `energy auto` | Set the total-energy figure directly |
+| `scaler <-9..9>` / `scaler 0` | Send values with a multiplier instead of plain |
+
+Unlike faults, **these stay set** until you change them — they are not
+corruptions, just things a real meter might do differently.
+
+Two notes worth having:
+
+- `energy` is how you check large numbers. Above about 16.7 million, software
+  that stores readings as a 32-bit decimal starts rounding them, which looks
+  like consumption that never happened. `energy 16777217` provokes it.
+- `scaler` changes the *shape* of the reading, not just a number. The E450 does
+  not send scalers at all, so there would be nothing to test otherwise; with one
+  set, the simulator sends the self-describing form other meters use. It is a
+  test of the receiver, not an imitation of this meter.
+
+### 6.4 What gets reported
+
+Every reading is logged as `key=value`, so a script can check it rather than
+guess:
+
+```
+I sim: emit n=42 mode=e450 fault=fcs:2 bytes=381 frames=3 wire_ms=1747 silent_ms=3253 gpio=17 pi=777 ei=777 fixed=1
+```
+
+`fault=` and `frames=` are the two that matter for fault testing: they let you
+assert *which* frame was damaged out of *how many*, instead of only noticing
+that something went wrong somewhere.
+
+`status` shows everything currently set:
+
+```
+OK pi=777 … mode=3/e450 period=5 gap=0 silence=0 serial=8 identity=none
+   scaler=0 energy=auto fault=none emissions=42
+```
+
+---
+
+## 7. Settings
+
+Changed before building, under **MBUS Simulator** in `idf.py menuconfig`. Only
+wiring-level things live here — everything you would change during a test is a
+console command (chapter 6).
 
 | Setting | Default | Change it when |
 |---|---|---|
@@ -293,7 +391,7 @@ reason.
 
 ---
 
-## 7. What it will not do
+## 8. What it will not do
 
 Worth knowing before you trust a test result:
 

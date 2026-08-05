@@ -104,7 +104,7 @@ above it is portable C++ that compiles on a Linux host.
 
 | Layer | Components | Chapter |
 |---|---|---|
-| **L2 Application** | Meter value model · Push scheduler · Operating modes | §5, §6, §13 |
+| **L2 Application** | Meter value model · Push scheduler · Operating modes · Runtime directives | §5, §6, §13, §14 |
 | **L1 Interfaces** | Telegram encoder (A-XDR → DataNotification → GBT → HDLC) · Control console | §7, §8 |
 | **L0 Foundation** | Meter link transport · Synthetic clock | §9, §10 |
 
@@ -341,6 +341,99 @@ them in order separates *the line is wrong* from *the decoder is wrong* from
 
 ---
 
+## 14. Runtime Directives
+
+### 14.1 Purpose
+
+Modes (§13) say what a correct meter sounds like. This chapter says how to make
+it misbehave on purpose — a corrupted checksum, a missing block, a burst that
+starts mid-frame, silence — so that error handling downstream can be provoked
+rather than waited for. `[user]`
+
+Five constraints shape the whole set, and each one exists because its opposite
+was tried somewhere and hurt:
+
+1. **Everything is runtime, over the console. Nothing is Kconfig.** A fault that
+   needs a rebuild makes the firmware image part of the test fixture, and a bench
+   run then cannot say which simulator produced its evidence.
+2. **The simulator reports what it emitted, machine-readably.** A test that
+   corrupts frame 2 of 3 must be able to assert *that frame was the corrupted
+   one*. Without the report, "something downstream discarded something" is the
+   only available observation.
+3. **One fault at a time, and it clears itself.** A sticky corruption silently
+   poisons every later case in the run.
+4. **Faults ride on fixed values.** An arithmetic assertion cannot be made
+   against a load that changes every emission, so a fault never composes with
+   mode 3's generator.
+5. **Silence is a capability, not the absence of one.** "The meter stopped
+   talking while the rig kept running" is a case, and it needs to be commanded.
+
+### 14.2 Requirements
+
+| ID | Pri | Requirement | Provenance |
+|---|---|---|---|
+| **FR-FLT-01** | Must | At most one fault shall be armed at a time; an armed fault shall apply to exactly one telegram and then clear itself; and a faulted telegram shall carry the fixed load of `fixed_model()` regardless of the active mode. | `[user]` |
+| **FR-FLT-02** | Must | `fault fcs <n>` shall emit a telegram in which frame *n*'s FCS is inverted and every other byte of every frame, including frame *n*'s, is unchanged. | `[user]` |
+| **FR-FLT-03** | Must | `fault truncate <n>` shall cut frame *n* inside its information field, emitting no FCS and no closing flag for it. | `[user]` |
+| **FR-FLT-04** | Must | `fault drop-block <k>` shall omit GBT block *k* entirely, so that the block numbers on the wire show the gap and the APDU cannot be completed. | `[user]` |
+| **FR-FLT-05** | Must | `fault start-mid-frame` shall begin transmission partway through frame 1, leaving every later frame byte-identical to an unfaulted emission. | `[user]` |
+| **FR-FLT-06** | Must | `fault duplicate-register <obis>` shall emit one telegram carrying that OBIS twice, with a **different** value the second time. | `[user]` |
+| **FR-FLT-07** | Must | `fault noise <n>` shall emit exactly *n* bytes containing no `0x7E` and no valid framing, then fall silent. | `[user]` |
+| **FR-FLT-08** | Must | `gap <ms>` shall set the silence between the last byte of one telegram and the first of the next, to a resolution of 1 ms; `gap 0` shall restore the wall-clock schedule of FR-SCH-01. | `[user]` |
+| **FR-FLT-09** | Must | `silence <seconds>` shall stop transmission for that long while the clock, the console and the schedule continue, and shall resume on the schedule rather than immediately. | `[user]` |
+| **FR-FLT-10** | Must | `identity <ldn\|devid\|none>` shall select which identity object the telegram carries — `0-0:42.0.0`, `0-0:96.1.0`, or neither. | `[user]` |
+| **FR-FLT-11** | Must | `serial <8\|16>` shall set the identity serial to that many characters, with no rebuild. | `[user]` |
+| **FR-FLT-12** | Must | `energy <wh>` shall set the cumulative import register to exactly that value, carried as a 4-byte unsigned integer, for any value up to 2³²−1. | `[user]` |
+| **FR-FLT-13** | Must | `scaler <n>` shall emit registers in the self-describing form carrying scaler *n*, such that the transmitted value is `raw × 10ⁿ` applied exactly once; `scaler 0` shall restore bare values. | `[user]` |
+| **FR-FLT-14** | Must | Every emission shall be reported on the console as `key=value` pairs including the emission number, mode, fault applied, byte count and frame count. | `[user]` |
+| **FR-FLT-15** | Must | Every directive in this chapter shall be settable at runtime over the console, and none shall be a build-time option. | `[user]` |
+
+> **On FR-FLT-13 — the scaler is a different shape, and that is deliberate.** The
+> E450 carries bare values with no scaler anywhere (FR-ENC-04), so a decoder given
+> a real telegram has nothing to scale by and the directive would be unobservable.
+> Setting a scaler therefore switches the registers to the self-describing form
+> `structure[3] { OBIS, value, structure[2]{ scaler, unit } }` — valid DLMS, and
+> what plenty of other meters emit, but **not** what this meter emits. It is a
+> decoder exercise, not a fidelity claim, and it appears only when asked for.
+> `[derived]`
+
+> **On FR-FLT-08 — `gap` suspends FR-SCH-01.** Wall-clock alignment and an exact
+> inter-telegram gap are incompatible: one puts telegrams on multiples of five
+> seconds, the other measures from the last byte out. A boundary case at 1999 vs
+> 2000 ms can only be placed by the second, so `gap` deliberately switches the
+> scheduler to free-running until set back to 0. `[derived]`
+
+> **On FR-FLT-12 — the one the host tier cannot close.** 16 777 217 is 2³²'s
+> little brother: 2²⁴ + 1, the first integer a 32-bit float cannot represent. The
+> host test proves the encoder carries it exactly, by finding `06 01 00 00 01` in
+> the APDU. It cannot prove what a decoder does with it, because the oracle's own
+> accessor returns a `float` and quantises it back to 16 777 216 — which the test
+> prints rather than hides. Closing this one needs a bench run against something
+> that does not use a float carrier. `[derived]`
+
+### 14.3 Verification contracts
+
+| ID | Precondition · stimulus | Expected | **Prohibited** | Tier |
+|---|---|---|---|---|
+| FR-FLT-01 | Arm any fault; observe two telegrams | Fault on the first, `fault=none` on the second | A fault surviving into a later telegram | host, bench |
+| FR-FLT-01 | Encode a faulted telegram in mode 3 | Load equals `fixed_model()`, not the generator's | Random values in a fault case | host |
+| FR-FLT-02 | `fault fcs 2`; recompute every frame's CRC independently | Frame 2 fails, all others pass; total length unchanged | Any other frame damaged; a length change | host |
+| FR-FLT-03 | `fault truncate 1` | Frame 1's declared length exceeds the bytes present; no closing flag | A short but internally consistent frame | host |
+| FR-FLT-04 | `fault drop-block 2` | Block numbers on the wire are 1, 3; surviving frames pass CRC | Block 2 present; a damaged survivor | host |
+| FR-FLT-05 | `fault start-mid-frame` | Stream does not begin on `0x7E`; frame 2 byte-identical to unfaulted | Any change to a later frame | host |
+| FR-FLT-06 | `fault duplicate-register 1.1.1.8.0.255` | The OBIS appears twice, values differ | Two identical values — the case would prove nothing | host |
+| FR-FLT-07 | `fault noise 64` | Exactly 64 bytes, no `0x7E`, decoder matches nothing | Any byte that could be read as a flag | host |
+| FR-FLT-08 | `gap 2000`, then `gap 1999`, capture the line | Measured silence tracks the setting to ±1 ms | Wall-clock alignment still in force | bench |
+| FR-FLT-09 | `silence 30`; poll `status` throughout | Nothing emitted; clock advances; console answers | A reset; a telegram; a frozen clock | bench |
+| FR-FLT-10 | Each of the three settings | The named object present, the other two absent | Both identity objects at once | host |
+| FR-FLT-11 | `serial 8` then `serial 16` | Octet string of 8 then 16 characters | A rebuild required | host |
+| FR-FLT-12 | `energy 16777217`; inspect the APDU | `06 01 00 00 01` present | A float-rounded 16 777 216 on the wire | host |
+| FR-FLT-13 | `scaler -2`, `0`, `2` with a 12345 register | Decoded 123.45, 12345, 1 234 500 | Scaling applied twice or not at all | host |
+| FR-FLT-14 | Any emission | One `key=value` line with `n=`, `mode=`, `fault=`, `bytes=`, `frames=` | A fault applied but not reported | bench |
+| FR-FLT-15 | `idf.py menuconfig` | No option for any directive in §14.2 | Any directive reachable only by rebuilding | host |
+
+---
+
 # Part B — Interfaces (L1)
 
 ## 7. Telegram Encoder
@@ -402,7 +495,7 @@ broker and no IP, and it cannot interfere with any network in use around it. `[u
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
 | **FR-CLI-01** | Must | The device shall expose a line-based console on UART0 at 115200 8N1. | `[user]` |
-| **FR-CLI-02** | Must | The console shall implement: `mode [1|2|3]`, `status`, `set time <ISO-8601>`, `help`. | `[user]` |
+| **FR-CLI-02** | Must | The console shall implement: `mode [1|2|3]`, `status`, `set time <ISO-8601>`, `help`, and the directives of §14 — `fault`, `gap`, `silence`, `serial`, `identity`, `energy`, `scaler`. | `[user]` |
 | **FR-CLI-03** | Must | Every command shall reply on one line, beginning `OK` or `ERR `, before any further output. | `[derived]` |
 | **FR-CLI-04** | Must | `status` shall print the complete state — both powers, power factor, all accumulators in Wh, clock, current mode, push period, emission count — as one `key=value` line. | `[derived]` |
 | **FR-CLI-05** | Must | A malformed or out-of-range argument shall leave the model unchanged and reply `ERR`. | `[derived]` |
