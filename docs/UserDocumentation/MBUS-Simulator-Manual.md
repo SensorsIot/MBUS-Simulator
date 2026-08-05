@@ -408,12 +408,41 @@ place. They should agree — if they do not, something is wrong with the link
 itself.
 
 `lead_us` would be the delay between the line waking up and the first data bit.
-It reports **`n/a` by default and that is deliberate**: the simulator drives the
-interface board but has no wire back from it, so it cannot see the line. To get
-a real number, connect the interface board's output back to a spare input pin
-and set `SIM_LINE_SENSE_GPIO`. Until then the honest answer is that nobody
-knows, and the log says so rather than printing something that looks like a
-measurement.
+It reports **`n/a`, and that is deliberate**: the simulator drives the interface
+board but has no wire back from it, so it cannot see the line at all. It knows
+only when it handed bytes to the UART, which is a different thing. Printing that
+instead would look like a measurement and be a guess.
+
+**Measure it with an oscilloscope instead** — see 6.6. (There is a firmware path
+for unattended runs: wire the interface board's *output*, divided down, to a
+spare input pin and set `SIM_LINE_SENSE_GPIO`. It is off by default and not
+normally needed.)
+
+### 6.6 Measuring the line with a scope
+
+If the ramp (6.2) says bytes are being lost, the next question is whether the
+interface board is slow to pull the line. A scope answers it, and mode 4 makes
+the trigger easy.
+
+**Why:** at these line settings the byte `0x00` is ten zero bits in a row — a
+**4.17 ms** low, the longest the line ever goes — and mode 4 starts every burst
+with it, after 3.25 seconds of silence. Nothing else looks like that, so it is a
+clean trigger with no traffic around it.
+
+```
+sim> mode 4
+OK 4 ramp
+```
+
+Probe the M-Bus line, trigger on the falling edge, and look at how long the line
+takes to settle at 12 V.
+
+**The number to compare against is 417 µs** — one bit. If settling eats a real
+fraction of that, the first characters are being read mid-transition, and the
+ramp will tell you exactly how many of them were lost.
+
+⚠ **Probe the bus, not a logic pin.** The M-Bus line swings between 12 V and
+24 V. Never connect it to a microcontroller input without dividing it down.
 
 `fault=` and `frames=` are the two that matter for fault testing: they let you
 assert *which* frame was damaged out of *how many*, instead of only noticing
@@ -440,6 +469,7 @@ console command (chapter 6).
 | `SIM_TX_INVERT` | off | 5.2 says the signal is inverted |
 | `SIM_PUSH_PERIOD_SECONDS` | 5 | You need longer gaps between readings |
 | `SIM_EPOCH` | 2026-01-01 | You want a different starting date |
+| `SIM_LINE_SENSE_GPIO` | −1 (off) | You want `lead_us` measured automatically instead of with a scope — see 6.5 |
 
 Five seconds is what a real E450 does, so leave it alone unless you have a
 reason.

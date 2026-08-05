@@ -89,8 +89,9 @@ toolchain to this devcontainer.
 **To operate the rig**, read
 [`docs/UserDocumentation/MBUS-Simulator-Manual.md`](docs/UserDocumentation/MBUS-Simulator-Manual.md)
 — installation, wiring, the console reference, what a healthy log looks like, and
-a diagnostic chapter that walks down the three modes to localise a fault, and the
-runtime directives that provoke faults deliberately.
+a diagnostic chapter that walks down the four modes to localise a fault, the
+runtime directives that provoke faults deliberately, and how to measure the line
+with a scope.
 
 [`docs/Functionality/MBUS-Simulator-FSD.md`](docs/Functionality/MBUS-Simulator-FSD.md)
 is the contract: 73 requirements, each with a verification contract naming the
