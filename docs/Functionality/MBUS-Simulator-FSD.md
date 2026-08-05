@@ -433,6 +433,14 @@ was tried somewhere and hurt:
 > The pin is Kconfig rather than a console directive because it is a fact about
 > the wiring, like the TX pin — not a test parameter.
 >
+> **In practice this is measured with an oscilloscope and the pin stays unwired**
+> `[user]`, which is the better instrument anyway: a scope shows the rise time
+> and the settling, where a GPIO shows one threshold crossing. Mode 4 makes the
+> trigger easy — `0x00` at 8E1 is ten consecutive zero bits, a 4.17 ms low after
+> 3.25 s of idle, and it is the first byte of every ramp burst. The number to
+> compare settling against is one bit time, **417 µs**. The firmware path exists
+> for unattended runs, and until one needs it, it stays dormant.
+>
 > `tx_ms` needs no extra hardware and is worth having on its own: `wire_ms` is
 > arithmetic on the byte count and would read 1747 ms even if the UART were
 > misconfigured. The two disagreeing is a finding. `[derived]`
@@ -483,6 +491,7 @@ was tried somewhere and hurt:
 | FR-FLT-16 | `preamble 32`, both fillers; compare bytes | Burst grows by exactly 32; telegram behind it byte-identical | Any change to the telegram | host |
 | FR-FLT-16 | Decode with 0, 1 and 32 flag bytes and 32 non-flag bytes | 12, 0, 0, 6 captures — the recorded characterisation | A silent change in this behaviour going unnoticed | host |
 | FR-FLT-17 | Any emission with no sense pin wired | `lead_us=n/a` | A number presented as a line measurement | bench |
+| FR-FLT-17 | Scope on the bus, mode 4, trigger on the first falling edge | Settling time recorded against one bit time (417 µs at 2400 baud) | Treating `n/a` as though the delay were zero | operator |
 | FR-FLT-17 | Any emission | `tx_ms` within 5 % of `wire_ms` | A silent disagreement between the two | bench |
 
 ---
