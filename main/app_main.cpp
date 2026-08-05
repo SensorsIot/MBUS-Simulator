@@ -37,15 +37,8 @@ constexpr bool TX_INVERTED = true;
 constexpr bool TX_INVERTED = false;
 #endif
 
-#if CONFIG_SIM_DUT_POWER_ACTIVE_HIGH
-constexpr bool DUT_POWER_ACTIVE_HIGH = true;
-#else
-constexpr bool DUT_POWER_ACTIVE_HIGH = false;
-#endif
-
 constexpr uart_port_t METER_UART = UART_NUM_2;
 constexpr auto TX_GPIO = static_cast<gpio_num_t>(CONFIG_SIM_MBUS_TX_GPIO);
-constexpr int DUT_POWER_GPIO = CONFIG_SIM_DUT_POWER_GPIO;
 
 // FR-SCH-01: emit when the clock's seconds field is divisible by the period.
 constexpr int PUSH_PERIOD_SECONDS = CONFIG_SIM_PUSH_PERIOD_SECONDS;
@@ -68,7 +61,6 @@ bool g_paused = false;
 // FR-CLI-07. Distinct from g_paused: `tx` must not disturb the pause state the
 // operator set, and must restore exactly what it found.
 bool g_tx_pattern = false;
-bool g_dut_powered = true;
 bool g_burst_requested = false;
 uint32_t g_invoke_id = 0;
 uint32_t g_telegrams = 0;
@@ -116,28 +108,6 @@ void configure_meter_link() {
     if (TX_INVERTED) {
         ESP_ERROR_CHECK(uart_set_line_inverse(METER_UART, UART_SIGNAL_TXD_INV));
     }
-}
-
-bool dut_power_available() { return DUT_POWER_GPIO >= 0; }
-
-void configure_dut_power() {
-    if (!dut_power_available()) {
-        ESP_LOGW(TAG, "no DUT power GPIO configured; 'dut on/off' will report ERR");
-        return;
-    }
-    const auto pin = static_cast<gpio_num_t>(DUT_POWER_GPIO);
-    gpio_config_t cfg = {};
-    cfg.pin_bit_mask = 1ULL << pin;
-    cfg.mode = GPIO_MODE_OUTPUT;
-    cfg.intr_type = GPIO_INTR_DISABLE;
-    ESP_ERROR_CHECK(gpio_config(&cfg));
-    gpio_set_level(pin, DUT_POWER_ACTIVE_HIGH ? 1 : 0);
-}
-
-void set_dut_power(bool on) {
-    if (!dut_power_available()) return;
-    const int level = DUT_POWER_ACTIVE_HIGH ? (on ? 1 : 0) : (on ? 0 : 1);
-    gpio_set_level(static_cast<gpio_num_t>(DUT_POWER_GPIO), level);
 }
 
 // ----------------------------------------------------------------- scheduler
@@ -322,7 +292,7 @@ int cmd_status(int, char **) {
     std::printf(
         "OK pi=%" PRIu32 " po=%" PRIu32 " pf=%.2f%s ei=%" PRIu32 " eo=%" PRIu32 " q1=%" PRIu32
         " q2=%" PRIu32 " q3=%" PRIu32 " q4=%" PRIu32 " i=%" PRIu32
-        " time=%04u-%02u-%02uT%02u:%02u:%02u paused=%d dut=%d period=%d telegrams=%" PRIu32 "\n",
+        " time=%04u-%02u-%02uT%02u:%02u:%02u paused=%d period=%d telegrams=%" PRIu32 "\n",
         g_model.import_w(), g_model.export_w(), static_cast<double>(g_model.power_factor()),
         g_model.lagging() ? "" : "L", g_model.import_wh(), g_model.export_wh(),
         g_model.reactive_varh(e450::ValueModel::Q1_IMPORT_LAGGING),
@@ -330,7 +300,7 @@ int cmd_status(int, char **) {
         g_model.reactive_varh(e450::ValueModel::Q3_EXPORT_LEADING),
         g_model.reactive_varh(e450::ValueModel::Q4_IMPORT_LEADING), g_model.current_ma(), now.year,
         now.month, now.day, now.hour, now.minute, now.second, g_paused ? 1 : 0,
-        g_dut_powered ? 1 : 0, PUSH_PERIOD_SECONDS, g_telegrams);
+        PUSH_PERIOD_SECONDS, g_telegrams);
     return 0;
 }
 
@@ -351,25 +321,6 @@ int cmd_pause(int, char **) {
 int cmd_resume(int, char **) {
     Lock held;
     g_paused = false;
-    std::printf("OK\n");
-    return 0;
-}
-
-int cmd_dut(int argc, char **argv) {
-    if (!dut_power_available()) {
-        std::printf("ERR no DUT power GPIO configured\n");
-        return 1;
-    }
-    if (argc < 2 || (std::strcmp(argv[1], "on") != 0 && std::strcmp(argv[1], "off") != 0)) {
-        std::printf("ERR usage: dut on|off\n");
-        return 1;
-    }
-    const bool on = std::strcmp(argv[1], "on") == 0;
-    set_dut_power(on);
-    {
-        Lock held;
-        g_dut_powered = on;
-    }
     std::printf("OK\n");
     return 0;
 }
@@ -432,7 +383,6 @@ void register_commands() {
         {"burst", "emit one telegram now, without disturbing the schedule", &cmd_burst},
         {"pause", "stop emitting and stop integrating", &cmd_pause},
         {"resume", "resume emitting", &cmd_resume},
-        {"dut", "dut on|off - switch the 5 V rail the device under test runs on", &cmd_dut},
         {"tx", "tx [seconds] - hold the line and emit only 0x55, to check line settings", &cmd_tx},
     };
 
@@ -474,7 +424,6 @@ extern "C" void app_main() {
     g_clock.set(parse_epoch());
 
     configure_meter_link();
-    configure_dut_power();
 
     ESP_LOGI(TAG, "E450 simulator: EBL Consumer Information 1, 13 objects, %d s, 2400 8E1%s",
              PUSH_PERIOD_SECONDS, TX_INVERTED ? " inverted" : "");

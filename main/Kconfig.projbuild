@@ -37,18 +37,6 @@ config SIM_PUSH_PERIOD_SECONDS
         minute boundary. app_main refuses to run with one that does not, rather
         than emitting a schedule nobody asked for. FSD FR-SCH-01/08.
 
-config SIM_DUT_POWER_GPIO
-    int "DUT 5 V enable GPIO"
-    default 16
-    help
-        Switches the 5 V rail the device under test runs on, so `dut off` can
-        power-cycle it. Set to -1 if the rig wires 5 V permanently — the
-        commands then report ERR rather than pretending to work. FSD FR-PWR-02.
-
-config SIM_DUT_POWER_ACTIVE_HIGH
-    bool "DUT power enable is active high"
-    default y
-
 config SIM_EPOCH
     string "Synthetic clock epoch"
     default "2026-01-01T00:00:00"

@@ -28,7 +28,7 @@ To operate it you need:
 |---|---|
 | The simulator board | ESP32 classic (WROOM), on a workbench slot |
 | The interface board | Non-inverting driver, logic level → 12/24 V M-Bus, fed from **GPIO17** |
-| A reader | Powered from the rig's 5 V, not from its own supply |
+| A reader | Powered from the M-Bus signal itself — it needs no supply of its own |
 | A workbench | Or a direct USB cable — chapter 3 covers both |
 
 There is no WiFi, no MQTT and no web interface. The console on UART0 is the
@@ -43,11 +43,14 @@ interfere with the network the reader is being tested on.
 |---|---|---|
 | M-Bus data | **GPIO17** → driver input | UART2 TX, 2400 baud, 8 data bits, even parity, 1 stop bit |
 | Idle level | GPIO17 **high** | Driver is non-inverting; high = 24 V on the bus = the mark state |
-| DUT 5 V enable | **GPIO16** | Switches the rail the reader runs on, so `dut off` can power-cycle it |
 | Ground | Common | |
 
-The reader has **no supply of its own** — a real meter feeds it — so a rig that
-drives only the data line leaves it dead and looking like a wiring fault.
+**The bus is also the reader's power.** It has no supply of its own and draws
+what it needs from the M-Bus line, so the 24 V mark state is not just a
+signalling level — it is the supply. That is why the firmware drives GPIO17 to
+the idle level within milliseconds of reset, before the UART is even configured:
+a line left floating between reset and start-up would brown out the reader as
+well as misframe it.
 
 If your driver stage inverts, set `SIM_TX_INVERT=y` (chapter 7) and the idle
 level flips to low. Chapter 6.2 tells you which you have, in ten seconds,
@@ -148,7 +151,6 @@ other output. That is a promise you can parse against.
 | `burst` | Emit one telegram now, without shifting the schedule | `OK` |
 | `pause` | Stop emitting **and** stop integrating | `OK` |
 | `resume` | Start again | `OK` |
-| `dut on` / `dut off` | Switch the reader's 5 V rail | `OK` |
 | `tx [1–30]` | Hold the line and send only `0x55` — see 6.2 | `OK 1090 bytes of 0x55 on GPIO17` |
 | `help` | List the above | |
 
@@ -158,7 +160,7 @@ other output. That is a promise you can parse against.
 
 ```
 OK pi=2300 po=0 pf=1.00 ei=0 eo=0 q1=0 q2=0 q3=0 q4=0 i=3333
-   time=2026-01-01T00:00:28 paused=0 dut=1 period=5 telegrams=6
+   time=2026-01-01T00:00:28 paused=0 period=5 telegrams=6
 ```
 
 | Field | Meaning |
@@ -170,7 +172,6 @@ OK pi=2300 po=0 pf=1.00 ei=0 eo=0 q1=0 q2=0 q3=0 q4=0 i=3333
 | `i` | Line current, mA — derived as `P / (3 × 230 V)` |
 | `time` | The synthetic clock |
 | `paused` | 1 while paused |
-| `dut` | 1 when the reader's 5 V rail is on |
 | `period` | Seconds between telegrams |
 | `telegrams` | Count since boot |
 
@@ -257,7 +258,7 @@ Now read what the reader received:
 | `D5 D5 D5 …` | **One inversion out.** Flip `SIM_TX_INVERT` (chapter 7). |
 | `AA AA AA …` | Inverted, with the receiver re-locking differently. Same fix. |
 | Bytes that vary, but consistently | Wrong baud rate or parity. |
-| Nothing at all | Wiring, driver, or the reader is unpowered — check `dut on`. |
+| Nothing at all | Wiring or driver — and since the reader draws its power from the bus, an unpowered reader is the same fault. |
 
 `0xD5` is worth recognising on sight, because it looks like garbage and is not.
 Invert a `0x55` frame and the receiver's start-bit edge lands one bit late, so it
@@ -277,9 +278,15 @@ transmissions were merged.
 
 ### 6.4 The reader is dead, not silent
 
-`dut off`, wait a second, `dut on`. If `status` shows `dut=1` and the reader
-still does nothing, it is not being powered by the rig — confirm the 5 V and
-ground reach it, and that `SIM_DUT_POWER_GPIO` matches how it is wired.
+The reader draws its power from the bus, so "no power" and "no signal" are the
+same fault seen twice — there is no separate supply to check. What to confirm is
+that the line is actually resting at **24 V** between telegrams: that mark state
+is the reader's supply, not just a signalling level. A line sitting at 12 V, or
+left floating, starves it.
+
+Measuring that needs a DVM on the bus; the simulator cannot tell you from the
+console. There is no way to power-cycle the reader from here — doing so would
+mean the simulator ceasing to be a meter — so unplug it by hand.
 
 ### 6.5 Reading the console over the network
 
@@ -305,8 +312,6 @@ Build-time, via `idf.py menuconfig` under **MBUS Simulator**, or by editing
 | `SIM_MBUS_TX_GPIO` | 17 | The interface board is on a different pin |
 | `SIM_TX_INVERT` | off | 6.2 says you are one inversion out |
 | `SIM_PUSH_PERIOD_SECONDS` | 5 | You need a wider silent gap. Must divide 60 |
-| `SIM_DUT_POWER_GPIO` | 16 | The 5 V rail is switched from another pin, or `-1` if permanent |
-| `SIM_DUT_POWER_ACTIVE_HIGH` | on | The enable is active low |
 | `SIM_EPOCH` | `2026-01-01T00:00:00` | You want a different starting date |
 
 5 s is the faithful period — it is what a real E450 does — so raise it only for a

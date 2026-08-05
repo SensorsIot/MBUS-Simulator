@@ -63,8 +63,8 @@ console CLI ──► value model ──► push scheduler ──► telegram en
                                               12/24 V M-Bus driver ◄─────────┘
                                                       │     (non-inverting)
                                                       ▼
-                                       gPlug GPIO7 ──► dlms_parser v2.1.0
-                                       + 5 V supply, Data Request
+                                       reader ──────► dlms_parser v2.1.0
+                                       powered from the bus
 ```
 
 ---
@@ -80,11 +80,13 @@ console CLI ──► value model ──► push scheduler ──► telegram en
 | Console UART | UART0 (GPIO1/GPIO3), 115200 8N1 | `[derived]` |
 | Line parameters | 2400 baud, 8 data bits, **even** parity, 1 stop bit | `[doc:LG]` §3.1 |
 | Driver stage | External, **non-inverting**, logic → 12/24 V M-Bus levels | `[user]`, `[measured]` |
-| DUT supply | Rig provides 5 V + GND + Data Request on the RJ45, switchable | `[user]` |
+| DUT supply | **The M-Bus signal itself.** No separate rail, nothing switchable | `[user]` |
 
-The gPlug has no independent supply — it is powered from the meter's 5 V rail
-(interface spec §2.1) — so a rig that drives only the data line leaves the DUT
-dead. `[derived]`
+The DUT has no independent supply: it draws its power from the bus, so the 24 V
+mark state FR-LNK-04 requires the idle line to hold is not merely a signalling
+level — it is the DUT's supply. A rig that leaves the line at 12 V, or floating
+from reset until `app_main` runs (FR-LNK-05), starves the reader as well as
+misframing it. `[derived]`
 
 ### 2.2 Component layering
 
@@ -332,9 +334,9 @@ on. `[user]`
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
 | **FR-CLI-01** | Must | The device shall expose a line-based console on UART0 at 115200 8N1. | `[user]` |
-| **FR-CLI-02** | Must | The console shall implement: `set pi <W>`, `set po <W>`, `set pf <0.00-1.00>`, `set time <ISO-8601>`, `status`, `burst`, `pause`, `resume`, `dut on`, `dut off`, `tx [seconds]`, `help`. | `[user]` |
+| **FR-CLI-02** | Must | The console shall implement: `set pi <W>`, `set po <W>`, `set pf <0.00-1.00>`, `set time <ISO-8601>`, `status`, `burst`, `pause`, `resume`, `tx [seconds]`, `help`. | `[user]` |
 | **FR-CLI-03** | Must | Every command shall reply on one line, beginning `OK` or `ERR `, before any further output. | `[derived]` |
-| **FR-CLI-04** | Must | `status` shall print the complete model state — both powers, power factor, all accumulators in Wh, clock, paused flag, DUT power state, telegram count — as one `key=value` line. | `[derived]` |
+| **FR-CLI-04** | Must | `status` shall print the complete model state — both powers, power factor, all accumulators in Wh, clock, paused flag, push period, telegram count — as one `key=value` line. | `[derived]` |
 | **FR-CLI-05** | Must | A malformed or out-of-range argument shall leave the model unchanged and reply `ERR`. | `[derived]` |
 | **FR-CLI-06** | Must | Console output shall never be written to UART2. | `[derived]` |
 | **FR-CLI-07** | Must | `tx [seconds]` shall emit `0x55` continuously on the meter link for 1–30 s (default 5), suppressing the scheduler for the duration so nothing else reaches the line, and shall reply with the byte count and GPIO. | `[user]` |
@@ -410,18 +412,28 @@ on. `[user]`
 |---|---|---|---|---|
 | FR-CLK-04 | Reset; `set time 2026-08-04T17:00:00`; `set pi 1000`; capture 12 telegrams. Repeat. | Both captures byte-identical | Any differing byte | target |
 
-## 11. DUT Power
+## 11. DUT Power — **withdrawn**
 
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
-| **FR-PWR-01** | Must | The rig shall supply 5 V, ground and the Data Request line to the DUT connector. | `[user]` |
-| **FR-PWR-02** | Must | `dut off` and `dut on` shall remove and restore that 5 V under firmware control. | `[user]` |
-| **FR-PWR-03** | Must | Removing DUT power shall not alter the model, the clock or the schedule. | `[derived]` |
+| **FR-PWR-01** | ~~Must~~ | `deprecated` 2026-08-05 — the rig shall supply 5 V, ground and the Data Request line to the DUT connector. | `[user]` |
+| **FR-PWR-02** | ~~Must~~ | `deprecated` 2026-08-05 — `dut off` and `dut on` shall remove and restore that 5 V under firmware control. | `[user]` |
+| **FR-PWR-03** | ~~Must~~ | `deprecated` 2026-08-05 — removing DUT power shall not alter the model, the clock or the schedule. | `[derived]` |
 
-| ID | Precondition · stimulus | Expected | **Prohibited** | Tier |
-|---|---|---|---|---|
-| FR-PWR-01 | Connect an unpowered gPlug; `dut on` | gPlug boots (LED sequence) | DUT requiring its own supply | bench |
-| FR-PWR-03 | `dut off`, 30 s, `dut on` | Energy counters continued rising throughout | Counters frozen or reset | bench |
+> **Why these are withdrawn, and why the IDs stay.** The premise was a separate
+> switched 5 V rail on GPIO16. There is no such rail: **the pin is not connected,
+> and the reader is powered from the M-Bus signal itself** — the 24 V mark state
+> that FR-LNK-04 requires the idle line to hold is what feeds it. `[user]`
+>
+> So the simulator has no way to remove the reader's power without ceasing to be
+> a meter, and `dut on`/`dut off` were a console command driving an unconnected
+> pin and replying `OK`. The command, the two Kconfig options and the `dut=`
+> field of `status` are removed. The IDs are kept and struck through rather than
+> deleted, so that earlier results referring to them stay readable.
+>
+> Power-cycling the DUT is still a useful capability and is now **out of scope**:
+> it would need a hardware enable on the driver stage, which does not exist. An
+> operator does it by hand.
 
 ---
 
@@ -433,7 +445,7 @@ on. `[user]`
 |---|---|---|---|
 | **host** | Linux, GitHub Actions, every push | Nothing | §5 model arithmetic, §7 encoder — decoded by `dlms_parser` v2.1.0 |
 | **target** | The ESP32 alone | Logic analyser or second ESP32 | §6 timing, §9 line, §10 determinism |
-| **bench** | Workbench + real gPlug | Both boards, workbench Pi | §8 console, §11 power, end-to-end |
+| **bench** | Workbench + a real reader | Both boards, workbench Pi | §8 console, §9 line settings, §6 cycle timing, end-to-end |
 
 **The host oracle is the decoder the DUT actually runs.** `test/host/CMakeLists.txt`
 fetches `dlms_parser` at tag **v2.1.0** — the same tag `gplug-mini` pins — so a
