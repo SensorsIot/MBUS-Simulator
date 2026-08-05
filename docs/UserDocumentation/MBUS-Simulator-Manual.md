@@ -1,243 +1,222 @@
-# MBUS-Simulator — Operator's Manual
+# MBUS-Simulator — User Manual
 
-How to install, run, and diagnose the E450 simulator. One document, chapters
-below; if you are looking for *what it must do* see the
-[FSD](../Functionality/MBUS-Simulator-FSD.md), and if you are looking for *how
-it is built* see the source.
+A fake electricity meter for testing meter readers.
 
-**Status:** covers everything the simulator does today. Chapter 6 is the one to
-read when something is wrong.
+Technical detail is deliberately not repeated here — where you need it, this
+manual points at the [FSD](../Functionality/MBUS-Simulator-FSD.md).
 
 ---
 
-## 1. What this is, and what you need
+## 1. What it does
 
-An ESP32 that pretends to be the customer-information interface of a Landis+Gyr
-E450 as parametrised by EBL Liestal. It pushes a telegram every 5 seconds
-carrying thirteen objects — power, energy, reactive energy by quadrant, and the
-three phase currents — so a meter reader can be developed and regression-tested
-without a meter.
+It pretends to be the customer interface of a Landis+Gyr E450 smart meter, the
+kind installed by EBL Liestal. Every five seconds it sends out a reading —
+power, energy, reactive energy and current — exactly as the real meter would, so
+you can develop and test a meter reader without having a meter.
 
-It **generates**, it does not replay: the energy counters integrate the power you
-set, so `set pi 2300` makes the reader see 2300 W and watch its import counter
-climb by 3.2 Wh every five seconds.
+**You tell it what the household is doing; it behaves accordingly.** Ask for a
+2300 W load and the reader will show 2300 W, and its energy counter will climb
+by 3.2 Wh every five seconds — because the simulator integrates the power you
+set, rather than replaying a recording. If the reader gets the arithmetic wrong,
+you find out.
 
-To operate it you need:
+You control it by typing commands on a serial console. There is no app, no web
+page and no WiFi.
+
+What it does **not** do: it is not a meter, measures nothing, and has no
+metrological standing. See chapter 6 for the limits that matter in practice.
+
+---
+
+## 2. How it is connected
+
+```
+   ESP32                interface board              your reader
+  ┌──────┐   GPIO17    ┌──────────────┐  12/24 V   ┌──────────┐
+  │  sim │ ──────────► │  M-Bus driver│ ─────────► │  reader  │
+  └──────┘             └──────────────┘            └──────────┘
+      │
+      │ USB — console, and how you flash it
+      ▼
+   your PC, or a workbench slot
+```
+
+Three connections and that is all:
 
 | | |
 |---|---|
-| The simulator board | ESP32 classic (WROOM), on a workbench slot |
-| The interface board | Non-inverting driver, logic level → 12/24 V M-Bus, fed from **GPIO17** |
-| A reader | Powered from the M-Bus signal itself — it needs no supply of its own |
-| A workbench | Or a direct USB cable — chapter 3 covers both |
+| **GPIO17 → interface board** | The meter signal |
+| **Ground** | Common between the boards |
+| **USB** | Console and firmware, to your PC or a workbench slot |
 
-There is no WiFi, no MQTT and no web interface. The console on UART0 is the
-entire user interface, by design: it needs no provisioning and it cannot
-interfere with the network the reader is being tested on.
+**The reader is powered by the meter signal itself** — it has no supply of its
+own, and there is no separate power wire to connect. That also means you cannot
+switch it off from the console; unplug it by hand.
 
----
-
-## 2. Wiring
-
-| Signal | Where | Notes |
-|---|---|---|
-| M-Bus data | **GPIO17** → driver input | UART2 TX, 2400 baud, 8 data bits, even parity, 1 stop bit |
-| Idle level | GPIO17 **high** | Driver is non-inverting; high = 24 V on the bus = the mark state |
-| Ground | Common | |
-
-**The bus is also the reader's power.** It has no supply of its own and draws
-what it needs from the M-Bus line, so the 24 V mark state is not just a
-signalling level — it is the supply. That is why the firmware drives GPIO17 to
-the idle level within milliseconds of reset, before the UART is even configured:
-a line left floating between reset and start-up would brown out the reader as
-well as misframe it.
-
-If your driver stage inverts, set `SIM_TX_INVERT=y` (chapter 7) and the idle
-level flips to low. Chapter 6.2 tells you which you have, in ten seconds,
-without a scope.
+The board is an ESP32 classic (WROOM). Line settings and pin choices are
+FSD §2.1 and §9.
 
 ---
 
-## 3. Installing the firmware
+## 3. Installing it
 
-The firmware is built in GitHub Actions, not locally — there is no ESP-IDF
-toolchain in this repo's devcontainer. Take the binaries from a green run.
+### 3.1 Get the firmware
+
+It is built automatically on every change. Download the latest:
 
 ```bash
-. /run/secrets/env                      # gh needs its token in a non-interactive shell
 gh run download -R SensorsIot/MBUS-Simulator -D /tmp/fw
-ls /tmp/fw/firmware-esp32/
-# flash_args  bootloader/  partition_table/  MBUS-Simulator.bin  ...
-```
-
-### 3.1 On a workbench
-
-Find the bench and the slot first — never assume either:
-
-```bash
-export WORKBENCH_URL=http://192.168.0.27:8080      # Workbench2; yours may differ
-curl -s $WORKBENCH_URL/api/devices | jq '.slots[] | {label, state, present, detected_chip}'
-```
-
-Then flash. The part names must equal the basenames `flash_args` refers to:
-
-```bash
 cd /tmp/fw/firmware-esp32
-curl -s -X POST $WORKBENCH_URL/api/flash \
+```
+
+### 3.2 Put it on the board
+
+**On a workbench** — find the address and the slot first, they are not fixed:
+
+```bash
+export WORKBENCH_URL=http://192.168.0.27:8080     # yours may differ
+curl -s $WORKBENCH_URL/api/devices                # which slot is the board in?
+
+curl -X POST $WORKBENCH_URL/api/flash \
   -F slot=SLOT3 -F chip=esp32 -F baud=460800 \
   -F flash_args=@flash_args \
   -F bootloader.bin=@bootloader/bootloader.bin \
   -F partition-table.bin=@partition_table/partition-table.bin \
-  -F MBUS-Simulator.bin=@MBUS-Simulator.bin | tail -c 200
+  -F MBUS-Simulator.bin=@MBUS-Simulator.bin
 ```
 
-The board is a CP2102 bridge, so it **must** be flashed this way rather than by
-pointing esptool at the RFC2217 proxy: the auto-reset window is too short to
-survive the network round-trips. `/api/flash` resets the board itself when it
-finishes — do not follow it with `/api/serial/reset`.
-
-### 3.2 Over a local USB cable
+**On a USB cable:**
 
 ```bash
-esptool --port /dev/ttyUSB0 --chip esp32 \
-  --before default-reset --after hard-reset \
-  write-flash @flash_args
+esptool --port /dev/ttyUSB0 --chip esp32 write-flash @flash_args
 ```
 
-### 3.3 Confirming what is running
+### 3.3 Check it took
 
-The banner names the firmware, and it is the first thing to check when the
-simulator "does nothing" — a board can easily be running something else
-entirely:
+Open the console (4.1) and reset the board. It says what it is:
 
 ```
 I (203) app_init: Project name:     MBUS-Simulator
 I (285) sim: E450 simulator: EBL Consumer Information 1, 13 objects, 5 s, 2400 8E1
 ```
 
-If the banner ends with `inverted`, TX inversion is on (chapter 7).
+If that banner names something else, the board is running other firmware and
+nothing else in this manual will make sense.
 
 ---
 
-## 4. Talking to it
+## 4. Using it
 
-The console is UART0 at **115200 8N1**, prompt `sim>`. Over a workbench, the
-RFC2217 port is `4000 + slot number` — SLOT3 is `4003`:
+### 4.1 Open the console
+
+115200 baud, prompt `sim>`. Locally:
 
 ```bash
-python3 -c "
-import serial
-s = serial.serial_for_url('rfc2217://192.168.0.27:4003', baudrate=115200, timeout=1)
-s.write(b'status\r\n')
-import time; time.sleep(1)
-print(s.read(1000).decode())"
+picocom -b 115200 /dev/ttyUSB0          # or idf.py monitor, or any terminal
 ```
 
-Locally, any terminal will do: `idf.py -p /dev/ttyUSB0 monitor`, `picocom -b
-115200 /dev/ttyUSB0`, whatever you have.
+On a workbench, the port is `4000 +` the slot number — SLOT3 is `4003`:
 
-Every command answers on **one line**, beginning `OK` or `ERR `, before any
-other output. That is a promise you can parse against.
+```bash
+picocom -b 115200 rfc2217://192.168.0.27:4003
+```
 
-### 4.1 Command reference
+### 4.2 A first session
 
-| Command | Does | Replies |
-|---|---|---|
-| `set pi <W>` | Import (consumed) active power, 0…1 000 000 W | `OK` |
-| `set po <W>` | Export (produced) active power | `OK` |
-| `set pf <0.00–1.00> [leading]` | Power factor; lagging unless `leading` is given | `OK` |
-| `set time <YYYY-MM-DDTHH:MM:SS>` | Set the synthetic clock | `OK` |
-| `status` | Whole model state, one `key=value` line | `OK pi=… ` |
-| `burst` | Emit one telegram now, without shifting the schedule | `OK` |
-| `pause` | Stop emitting **and** stop integrating | `OK` |
-| `resume` | Start again | `OK` |
-| `tx [1–30]` | Hold the line and send only `0x55` — see 6.2 | `OK 1090 bytes of 0x55 on GPIO17` |
-| `help` | List the above | |
+Simulate a 2.3 kW load and watch the reader follow it:
 
-`ERR` leaves the model untouched, always. `set pi -5` changes nothing.
+```
+sim> set pi 2300
+OK
+sim> status
+OK pi=2300 po=0 pf=1.00 ei=0 eo=0 q1=0 q2=0 q3=0 q4=0 i=3333 …
+```
 
-### 4.2 Reading `status`
+Within five seconds the reader should report **2300 W**, and its import energy
+counter should rise by about 3.2 Wh per reading. That is the basic round trip —
+if it works, everything downstream of the simulator is fine.
+
+### 4.3 Commands
+
+| Command | What it does |
+|---|---|
+| `set pi <watts>` | Power being **consumed** — the normal case |
+| `set po <watts>` | Power being **fed back**, e.g. from solar |
+| `set pf <0.00–1.00> [leading]` | Power factor. Inductive unless you say `leading` |
+| `set time <YYYY-MM-DDTHH:MM:SS>` | Move the clock |
+| `status` | Show everything, on one line |
+| `burst` | Send one reading immediately |
+| `pause` / `resume` | Stop and restart sending |
+| `tx [seconds]` | Send a test pattern instead of readings — see 5.2 |
+| `help` | List the commands |
+
+Every command answers `OK` or `ERR …` on a single line. `ERR` changes nothing.
+
+### 4.4 Reading `status`
 
 ```
 OK pi=2300 po=0 pf=1.00 ei=0 eo=0 q1=0 q2=0 q3=0 q4=0 i=3333
    time=2026-01-01T00:00:28 paused=0 period=5 telegrams=6
 ```
 
-| Field | Meaning |
-|---|---|
-| `pi` / `po` | Import / export active power, W |
-| `pf` | Power factor; a trailing `L` means leading |
-| `ei` / `eo` | Import / export active energy, Wh |
-| `q1`…`q4` | Reactive energy per quadrant, varh |
-| `i` | Line current, mA — derived as `P / (3 × 230 V)` |
-| `time` | The synthetic clock |
-| `paused` | 1 while paused |
-| `period` | Seconds between telegrams |
-| `telegrams` | Count since boot |
+**Three fields are what you asked for; the rest are what follows from it.**
 
-**The clock is synthetic and starts at a compiled-in epoch**, not at the real
-date. That is deliberate: the same test run twice produces the same bytes, which
-is impossible with a real clock. `set time` moves it.
+| You set | |
+|---|---|
+| `pi` / `po` | Consumed / fed-back power, W |
+| `pf` | Power factor; a trailing `L` as in `pf=0.90L` means leading |
+
+| It works out | |
+|---|---|
+| `ei` / `eo` | Energy consumed / fed back, Wh — the running totals |
+| `q1`…`q4` | Reactive energy, varh. All four stay at 0 while `pf` is 1.00 |
+| `i` | Current, mA — worked out from the power, not measured |
+| `telegrams` | Readings sent since power-on |
+
+| Housekeeping | |
+|---|---|
+| `time` | The clock |
+| `paused` | 1 if you have paused it |
+| `period` | Seconds between readings |
+
+Two things that look wrong and are not:
+
+- **`ei` can sit at 0 while power flows.** Energy accrues from the power set *at
+  the time*, so it counts from when you set the load, not before.
+- **`ei` steps unevenly** — 1, 3, 5, 6, 8, 10. It shows whole watt-hours while
+  counting in fractions, so a steady load gives uneven-looking steps. Nothing is
+  lost; see FSD FR-MDL-04.
+
+**The clock starts from a fixed date, not today's.** That is on purpose: the same
+test run twice produces identical output, which is impossible with a real clock.
+`set time` moves it.
 
 ---
 
-## 5. What healthy looks like
+## 5. When something looks wrong
 
-Simulator side, one line per telegram:
+Work down in order. Each step rules something out, so the first failure tells
+you where the problem is.
+
+### 5.1 Is it sending anything?
+
+Watch the console. A line appears every five seconds:
 
 ```
 I (32082) sim: telegram 6: 381 bytes on GPIO17, 1747 ms on the wire, 3253 ms silent
 ```
 
-Three numbers to know:
+- **It appears** → the simulator is fine; the problem is the wiring, the
+  interface board, or the reader. Go to 5.2.
+- **It does not** → check `status` for `paused=1`, then re-check the banner
+  (3.3). A board running different firmware looks exactly like a broken one.
 
-- **381 bytes** — the thirteen-object list. Constant; the values are fixed-width,
-  so it does not change with the load you set.
-- **1747 ms on the wire** — at 2400 baud with 11 bits per character, the line
-  carries 218 bytes per second and nothing faster.
-- **3253 ms silent** — the gap before the next telegram. This one matters: a
-  reader decides a transmission has ended after about 2 s of quiet, so if the gap
-  ever fell below that it would splice two telegrams into one and decode neither.
-  The firmware prints one `E`-level line if it drops under 3000 ms.
+### 5.2 Is the signal getting through correctly?
 
-Reader side, one cycle per telegram:
-
-```
-gplug: active_power_plus  = 2300.000 W
-gplug: cycle: 381 bytes, 12 objects, 301 consumed
-```
-
-**12 objects, not 13** — the first entry in the list is the push-setup's own
-object list, an array of definitions rather than a reading, so twelve values come
-out of thirteen objects. That is correct.
-
-A round-trip you can do in a minute: `set pi 2300`, wait two cycles, and the
-reader should say `2300.000 W` while its import counter climbs 3.2 Wh per cycle
-(2300 W × 5 s = 3.19 Wh).
-
----
-
-## 6. When something is wrong
-
-Work down this chapter in order. Each step rules something out, so stopping at
-the first failure tells you where the fault is.
-
-### 6.1 Is it emitting at all?
-
-Look for the `telegram N:` line on the simulator console. It appears every five
-seconds.
-
-- **Present** — the fault is after the pin: driver, wiring, reader, or line
-  settings. Go to 6.2.
-- **Absent** — the fault is before the pin. Check `status` for `paused=1`, then
-  check the boot banner (3.3) actually names `MBUS-Simulator`. A board running
-  some other project looks exactly like a broken simulator.
-
-### 6.2 Are the line settings right? — the `tx` test
-
-This is the most useful ten seconds in the manual. `0x55` is `01010101`, every
-bit alternating, so it tests the line and nothing else: no framing, no checksums
-and no content have to be right for the answer to mean something.
+`tx` sends a plain test pattern — the byte `0x55`, which is just alternating
+bits — instead of readings. Nothing complicated has to be right for it to mean
+something, which is why it is the fastest way to find a wiring or settings
+fault.
 
 ```
 sim> pause
@@ -246,90 +225,65 @@ OK 1090 bytes of 0x55 on GPIO17
 sim> resume
 ```
 
-`tx` holds the line for its whole duration — the scheduler is suppressed, so
-nothing else can get spliced into the pattern. `pause` is belt-and-braces so the
-reader sees the burst alone rather than merged with a telegram.
+Now look at what your reader received:
 
-Now read what the reader received:
-
-| It receives | Meaning |
+| It received | What is wrong |
 |---|---|
-| `55 55 55 …` | Line settings correct. The fault is in the content or further up. |
-| `D5 D5 D5 …` | **One inversion out.** Flip `SIM_TX_INVERT` (chapter 7). |
-| `AA AA AA …` | Inverted, with the receiver re-locking differently. Same fix. |
-| Bytes that vary, but consistently | Wrong baud rate or parity. |
-| Nothing at all | Wiring or driver — and since the reader draws its power from the bus, an unpowered reader is the same fault. |
+| `55 55 55 …` | Nothing — the signal is correct. The fault is further along. |
+| `D5 D5 D5 …` or `AA AA AA …` | The signal is inverted. Change `SIM_TX_INVERT` (chapter 7). |
+| Bytes that vary, but always the same way | Wrong speed or parity setting at the reader. |
+| Nothing at all | Wiring, or the interface board. The reader takes its power from this signal, so no signal also means no reader. |
 
-`0xD5` is worth recognising on sight, because it looks like garbage and is not.
-Invert a `0x55` frame and the receiver's start-bit edge lands one bit late, so it
-samples `1 0 1 0 1 0 1 1` — `0xD5` — with a parity error, identically every
-frame. Perfectly consistent nonsense means polarity, not noise.
+`D5` looks like nonsense but is not: consistent nonsense means an inverted
+signal, not interference. The reasoning is in FSD FR-LNK-02.
 
-### 6.3 The reader receives bytes but decodes nothing
+### 5.3 The reader gets data but cannot read it
 
-If 6.2 is clean and telegrams still do not decode, check the gap. On the
-simulator console the `ms silent` figure must be comfortably above 2000; if you
-have raised the object count or lowered the period it may not be. Raise
-`SIM_PUSH_PERIOD_SECONDS` (chapter 7).
+Check the **`ms silent`** figure on the console line above. Readers decide a
+transmission has finished when the line goes quiet for about two seconds, so
+that number needs to stay comfortably above 2000. If you have shortened the
+period it may not be. The simulator prints an error line of its own when this
+happens — see FSD FR-SCH-08.
 
-Two symptoms that name this fault directly: the reader reporting a cycle much
-larger than 381 bytes, or complaining that a cycle exceeded its buffer. Both mean
-transmissions were merged.
+A reader complaining about oversized data, or reporting far more bytes than the
+simulator sent, means readings were run together — same cause.
 
-### 6.4 The reader is dead, not silent
+### 5.4 The reader seems dead
 
-The reader draws its power from the bus, so "no power" and "no signal" are the
-same fault seen twice — there is no separate supply to check. What to confirm is
-that the line is actually resting at **24 V** between telegrams: that mark state
-is the reader's supply, not just a signalling level. A line sitting at 12 V, or
-left floating, starves it.
-
-Measuring that needs a DVM on the bus; the simulator cannot tell you from the
-console. There is no way to power-cycle the reader from here — doing so would
-mean the simulator ceasing to be a meter — so unplug it by hand.
-
-### 6.5 Reading the console over the network
-
-The workbench can capture a slot read-only, which is the right way to watch the
-**reader**: opening its serial port directly toggles DTR, and on a native-USB
-part that resets it.
-
-```bash
-curl -s -X POST $WORKBENCH_URL/api/serial/monitor \
-  -H 'Content-Type: application/json' \
-  -d '{"slot":"SLOT1","timeout":20}' | jq -r '.output[]'
-```
+It is powered by the meter signal, so "no power" and "no signal" are the same
+fault. Confirm the interface board is producing 24 V on the line while the
+simulator is idle. That needs a meter on the wire; the console cannot tell you.
 
 ---
 
-## 7. Configuration
+## 6. Settings
 
-Build-time, via `idf.py menuconfig` under **MBUS Simulator**, or by editing
-`sdkconfig.defaults` and rebuilding.
+Changed before building, under **MBUS Simulator** in `idf.py menuconfig`.
 
-| Option | Default | Change it when |
+| Setting | Default | Change it when |
 |---|---|---|
-| `SIM_MBUS_TX_GPIO` | 17 | The interface board is on a different pin |
-| `SIM_TX_INVERT` | off | 6.2 says you are one inversion out |
-| `SIM_PUSH_PERIOD_SECONDS` | 5 | You need a wider silent gap. Must divide 60 |
-| `SIM_EPOCH` | `2026-01-01T00:00:00` | You want a different starting date |
+| `SIM_MBUS_TX_GPIO` | 17 | The interface board is on another pin |
+| `SIM_TX_INVERT` | off | 5.2 says the signal is inverted |
+| `SIM_PUSH_PERIOD_SECONDS` | 5 | You need longer gaps between readings |
+| `SIM_EPOCH` | 2026-01-01 | You want a different starting date |
 
-5 s is the faithful period — it is what a real E450 does — so raise it only for a
-rig that needs the margin.
+Five seconds is what a real E450 does, so leave it alone unless you have a
+reason.
 
 ---
 
-## 8. Limits worth knowing before you trust a result
+## 7. What it will not do
 
-- **No meter serial.** EBL puts `0-0:96.1.0` in the 15 s list, which this version
-  does not emit, so a reader tested here never learns a meter identity. In the
-  field it arrives every 15 s. A reader that defers work until it has one will
-  defer forever against this rig.
-- **Not encrypted.** Real E450 customer interfaces are commonly authenticated and
-  encrypted; this one is plaintext.
-- **One list only** — Consumer Information 1, every 5 s. No 15 s, 1 min or
-  15 min lists.
-- **Decodable is not faithful.** The host tests prove the reader's decoder
-  accepts these bytes. A tolerant decoder would also accept telegrams a real
-  E450 never emits, so passing here is necessary, not sufficient.
-- **The clock is synthetic** and starts from the compiled-in epoch on every boot.
+Worth knowing before you trust a test result:
+
+- **No meter serial number.** The real meter sends it in a different, slower
+  list that this simulator does not produce. A reader waiting to learn the
+  meter's identity will wait forever here.
+- **Nothing is encrypted.** Real installations often are.
+- **One kind of reading only** — the five-second list. No 15-second, minute or
+  quarter-hour lists.
+- **Passing here is necessary, not sufficient.** It proves a reader *can* read
+  this output. A forgiving reader would also accept things a real meter never
+  sends.
+
+Full scope and the reasoning behind each: FSD §1.5 and Appendix A.
