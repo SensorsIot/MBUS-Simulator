@@ -115,10 +115,13 @@ void IRAM_ATTR line_sense_isr(void *) {
 }
 
 void configure_line_sense() {
-    if (!line_sense_available()) {
+    // `if constexpr`, not `if`: with the pin at its -1 default the else-branch
+    // would still be compiled, and `1ULL << -1` is a hard error rather than dead
+    // code the optimiser drops.
+    if constexpr (LINE_SENSE_GPIO < 0) {
         ESP_LOGI(TAG, "no line-sense GPIO: lead_us will report n/a (FR-FLT-17)");
         return;
-    }
+    } else {
     const auto pin = static_cast<gpio_num_t>(LINE_SENSE_GPIO);
     gpio_config_t cfg = {};
     cfg.pin_bit_mask = 1ULL << pin;
@@ -130,6 +133,7 @@ void configure_line_sense() {
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
     ESP_ERROR_CHECK(gpio_isr_handler_add(pin, &line_sense_isr, nullptr));
     ESP_LOGI(TAG, "line sense on GPIO%d", LINE_SENSE_GPIO);
+    }
 }
 
 void configure_meter_link() {
