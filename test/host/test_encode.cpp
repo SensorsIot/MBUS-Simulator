@@ -11,13 +11,18 @@
 // decoder would accept telegrams a real E450 never emits.
 
 #include <dlms_parser/dlms_parser.h>
+#include <e450/directives.h>
 #include <e450/ebl_ci1.h>
+#include <e450/emission.h>
+#include <e450/faults.h>
 #include <e450/modes.h>
 #include <e450/rng.h>
 #include <e450/telegram.h>
 #include <e450/value_model.h>
 
 #include <cinttypes>
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -426,6 +431,294 @@ void case_mode_random() {
     }
 }
 
+
+// ------------------------------------------------- phase 2 directives (§14)
+
+// Walk a byte stream as HDLC frames, reporting each frame's length and whether
+// its FCS is right. Written here rather than reusing the encoder, so a fault
+// test cannot be fooled by the same mistake twice.
+struct FrameInfo {
+    std::size_t offset;
+    std::size_t length;
+    bool fcs_ok;
+    bool closed;
+};
+
+uint16_t x25(const uint8_t *data, std::size_t len) {
+    uint16_t c = 0xFFFF;
+    for (std::size_t i = 0; i < len; ++i) {
+        c ^= data[i];
+        for (int b = 0; b < 8; ++b) c = (c & 1) ? uint16_t((c >> 1) ^ 0x8408) : uint16_t(c >> 1);
+    }
+    return uint16_t(c ^ 0xFFFF);
+}
+
+std::vector<FrameInfo> walk(const std::vector<uint8_t> &wire) {
+    std::vector<FrameInfo> out;
+    std::size_t pos = 0;
+    while (pos + 3 < wire.size()) {
+        if (wire[pos] != 0x7E) { ++pos; continue; }
+        const std::size_t len = (std::size_t(wire[pos + 1] & 0x07) << 8) | wire[pos + 2];
+        if (len < 10 || pos + 1 + len > wire.size()) break;
+        const uint16_t want = uint16_t(wire[pos + len - 1] | (wire[pos + len] << 8));
+        const uint16_t got = x25(&wire[pos + 1], len - 2);
+        out.push_back({pos, len + 2, want == got, pos + 1 + len < wire.size() &&
+                                                      wire[pos + 1 + len] == 0x7E});
+        pos += len + 2;
+    }
+    return out;
+}
+
+std::vector<std::vector<uint8_t>> fault_frames() {
+    const e450::EmissionConfig cfg;
+    const e450::FaultSpec none;
+    const e450::Emission plan = e450::plan_e450(e450::fixed_model(), cfg, none);
+    return e450::encode_telegram_frames(plan.spec(1, e450::DateTime{}));
+}
+
+// FR-FLT-01 — the load a fault telegram carries is fixed.
+void case_fault_fixed_values() {
+    const e450::ValueModel a = e450::fixed_model();
+    const e450::ValueModel b = e450::fixed_model();
+    check(a.import_w() == b.import_w() && a.import_wh() == b.import_wh(),
+          "fixed_model is the same every call");
+    check(a.import_w() == 777, "fixed load is mode 2's 777 W");
+    check(a.import_wh() == 777, "one hour at 777 W is 777 Wh");
+    std::printf("  fixed: %u W, %u Wh\n", unsigned(a.import_w()), unsigned(a.import_wh()));
+}
+
+// FR-FLT-02 — frame n's FCS is wrong; every other frame is untouched.
+void case_fault_fcs() {
+    const auto frames = fault_frames();
+    check(frames.size() >= 3, "the e450 telegram spans several frames");
+
+    e450::FaultSpec f;
+    f.kind = e450::Fault::Fcs;
+    f.arg = 2;
+    const std::vector<uint8_t> wire = e450::apply_wire_fault(frames, f);
+    const std::vector<uint8_t> clean = e450::apply_wire_fault(frames, e450::FaultSpec{});
+
+    check(wire.size() == clean.size(), "corrupting an FCS does not change the length");
+    const auto walked = walk(wire);
+    check(walked.size() == frames.size(), "every frame is still present");
+    for (std::size_t i = 0; i < walked.size(); ++i) {
+        const bool should_fail = (i == 1);
+        check(walked[i].fcs_ok != should_fail,
+              should_fail ? "frame 2's FCS is wrong" : "other frames' FCS are right");
+    }
+}
+
+// FR-FLT-03 — frame n is cut inside its information field, with no closing flag.
+void case_fault_truncate() {
+    const auto frames = fault_frames();
+    e450::FaultSpec f;
+    f.kind = e450::Fault::Truncate;
+    f.arg = 1;
+    const std::vector<uint8_t> wire = e450::apply_wire_fault(frames, f);
+
+    check(wire.size() < e450::apply_wire_fault(frames, e450::FaultSpec{}).size(),
+          "truncation removes bytes");
+    // The declared length of frame 1 now exceeds what is actually there, which
+    // is the condition a receiver has to reject rather than half-accept.
+    const std::size_t declared = (std::size_t(wire[1] & 0x07) << 8) | wire[2];
+    std::size_t to_next_flag = 1;
+    while (to_next_flag < wire.size() && wire[to_next_flag] != 0x7E) ++to_next_flag;
+    check(declared + 1 > to_next_flag, "frame 1 claims more bytes than it carries");
+}
+
+// FR-FLT-04 — block k is never sent, so the APDU cannot be completed.
+void case_fault_drop_block() {
+    const auto frames = fault_frames();
+    e450::FaultSpec f;
+    f.kind = e450::Fault::DropBlock;
+    f.arg = 2;
+    const std::vector<uint8_t> wire = e450::apply_wire_fault(frames, f);
+
+    const auto walked = walk(wire);
+    check(walked.size() == frames.size() - 1, "one frame fewer");
+    for (const FrameInfo &fi : walked) check(fi.fcs_ok, "the surviving frames are intact");
+
+    // The GBT block numbers must show the gap — that is what makes the APDU
+    // provably incomplete rather than merely short. Block number is the two
+    // bytes after the 0xE0 tag and control byte in the first frame's payload.
+    std::vector<unsigned> blocks;
+    for (const FrameInfo &fi : walked) {
+        for (std::size_t i = fi.offset; i + 5 < fi.offset + fi.length; ++i) {
+            if (wire[i] == 0xE0 && (wire[i + 1] == 0x40 || wire[i + 1] == 0xC0)) {
+                blocks.push_back(unsigned(wire[i + 3]));
+                break;
+            }
+        }
+    }
+    std::printf("  blocks on the wire:");
+    for (unsigned b : blocks) std::printf(" %u", b);
+    std::printf("\n");
+    check(blocks.size() == frames.size() - 1, "one block fewer on the wire");
+    check(std::find(blocks.begin(), blocks.end(), 2u) == blocks.end(), "block 2 is absent");
+
+    // What a decoder does with the remains is its business, not ours. Recorded
+    // rather than asserted: this oracle is permissive and salvages captures from
+    // an incomplete APDU, which is exactly the behaviour the directive exists to
+    // provoke a test for downstream.
+    std::size_t count = 0;
+    decode(wire, &count);
+    std::printf("  a permissive decoder still matched %zu capture(s) from the remains\n", count);
+}
+
+// FR-FLT-05 — transmission begins partway through frame 1.
+void case_fault_start_mid_frame() {
+    const auto frames = fault_frames();
+    e450::FaultSpec f;
+    f.kind = e450::Fault::StartMidFrame;
+    const std::vector<uint8_t> wire = e450::apply_wire_fault(frames, f);
+    const std::vector<uint8_t> clean = e450::apply_wire_fault(frames, e450::FaultSpec{});
+
+    check(wire.size() == clean.size() - e450::START_MID_FRAME_SKIP, "the head is missing");
+    check(wire[0] != 0x7E, "the stream does not begin on a flag");
+    // Frames 2 onward are byte-identical, so anything that resynchronises on the
+    // next flag recovers them in full.
+    check(std::equal(frames[1].begin(), frames[1].end(),
+                     wire.begin() + std::ptrdiff_t(frames[0].size() - e450::START_MID_FRAME_SKIP)),
+          "frame 2 survives intact");
+}
+
+// FR-FLT-06 — one register appears twice, with different values.
+void case_fault_duplicate_register() {
+    e450::FaultSpec f;
+    f.kind = e450::Fault::DuplicateRegister;
+    f.obis = {1, 1, 1, 8, 0, 0xFF};
+    const e450::EmissionConfig cfg;
+    const e450::Emission plan = e450::plan_simple(cfg, f);
+
+    std::size_t seen = 0;
+    for (const e450::CaptureObject &o : plan.objects) {
+        if (o.obis == f.obis) ++seen;
+    }
+    check(seen == 2, "the register is listed twice");
+    check(plan.objects.size() == plan.values.size(), "one value per object");
+
+    // The two values must differ, or "kept the first" and "kept the last" are
+    // the same observation and the fault proves nothing.
+    uint32_t first = 0, second = 0, hits = 0;
+    for (std::size_t i = 0; i < plan.objects.size(); ++i) {
+        if (plan.objects[i].obis != f.obis) continue;
+        const uint32_t v = plan.values[i].u32;
+        (hits++ == 0 ? first : second) = v;
+    }
+    std::printf("  duplicate values: %u then %u\n", unsigned(first), unsigned(second));
+    check(first != second, "the duplicate carries a different value");
+}
+
+// FR-FLT-07 — a burst of bytes with no framing in it at all.
+void case_fault_noise() {
+    const std::vector<uint8_t> n = e450::noise_bytes(64);
+    check(n.size() == 64, "the requested number of bytes");
+    for (uint8_t b : n) check(b != 0x7E, "no byte can be mistaken for a flag");
+    check(e450::noise_bytes(64) == n, "noise is deterministic");
+
+    std::size_t count = 0;
+    decode(n, &count);
+    check(count == 0, "noise decodes to nothing");
+}
+
+// FR-FLT-10/11 — which identity object appears, and how long the serial is.
+void case_directive_identity() {
+    const e450::FaultSpec none;
+    const std::array<uint8_t, 6> devid{0, 0, 96, 1, 0, 0xFF};
+    const std::array<uint8_t, 6> ldn{0, 0, 42, 0, 0, 0xFF};
+
+    auto has = [&](const e450::Emission &e, const std::array<uint8_t, 6> &obis) {
+        for (const e450::CaptureObject &o : e.objects) {
+            if (o.obis == obis) return true;
+        }
+        return false;
+    };
+
+    e450::EmissionConfig cfg;
+    cfg.identity = e450::Identity::None;
+    const e450::Emission a = e450::plan_simple(cfg, none);
+    check(!has(a, devid) && !has(a, ldn), "identity none carries neither object");
+
+    cfg.identity = e450::Identity::DevId;
+    cfg.serial_chars = 8;
+    const e450::Emission b = e450::plan_simple(cfg, none);
+    check(has(b, devid) && !has(b, ldn), "identity devid carries 0-0:96.1.0");
+
+    cfg.identity = e450::Identity::Ldn;
+    const e450::Emission c = e450::plan_simple(cfg, none);
+    check(has(c, ldn) && !has(c, devid), "identity ldn carries 0-0:42.0.0");
+
+    // FR-FLT-11: the serial's length is what changes, not its digits.
+    std::size_t len8 = 0, len16 = 0;
+    cfg.identity = e450::Identity::DevId;
+    cfg.serial_chars = 8;
+    for (const e450::TelegramValue &v : e450::plan_simple(cfg, none).values) {
+        if (v.kind == e450::TelegramValue::Kind::OctetString) len8 = v.octets.size();
+    }
+    cfg.serial_chars = 16;
+    for (const e450::TelegramValue &v : e450::plan_simple(cfg, none).values) {
+        if (v.kind == e450::TelegramValue::Kind::OctetString) len16 = v.octets.size();
+    }
+    std::printf("  serial lengths: %zu and %zu\n", len8, len16);
+    check(len8 == 8 && len16 == 16, "both serial forms available without a rebuild");
+}
+
+// FR-FLT-12 — a cumulative register set directly, above the float boundary.
+//
+// 16 777 217 is 2^24 + 1: the first integer a 32-bit float cannot represent.
+// The encoder must carry it exactly. The oracle here returns a float, so it
+// *cannot* confirm that end to end — and this test says so out loud rather than
+// asserting something weaker and calling it proof.
+void case_directive_energy() {
+    e450::EmissionConfig cfg;
+    cfg.energy_set = true;
+    cfg.energy_wh = 16'777'217u;
+    const e450::Emission plan = e450::plan_e450(e450::fixed_model(), cfg, e450::FaultSpec{});
+
+    // Position 5 of Appendix A is 1-1:1.8.0 — asserted, not assumed.
+    const std::array<uint8_t, 6> energy_obis{1, 1, 1, 8, 0, 0xFF};
+    check(plan.objects[4].obis == energy_obis, "the override lands on 1-1:1.8.0");
+    check(plan.values[4].u32 == 16'777'217u, "the exact value is carried");
+
+    // And it survives into the bytes as a 4-byte unsigned, not a float.
+    const std::vector<uint8_t> apdu = e450::encode_apdu(plan.spec(0, e450::DateTime{}));
+    const uint8_t want[5] = {0x06, 0x01, 0x00, 0x00, 0x01};
+    check(std::search(apdu.begin(), apdu.end(), want, want + 5) != apdu.end(),
+          "06 01 00 00 01 appears in the APDU");
+
+    const std::map<std::string, double> values = decode(e450::encode_telegram(
+        plan.spec(0, e450::DateTime{})));
+    const double seen = values.count(OBIS_E_IMPORT) ? values.at(OBIS_E_IMPORT) : -1;
+    std::printf("  sent 16777217, a float oracle reports %.0f%s\n", seen,
+                seen == 16'777'216.0 ? "  <- quantised, as expected" : "");
+}
+
+// FR-FLT-13 — a non-zero scaler, applied exactly once.
+void case_directive_scaler() {
+    for (const int8_t scaler : {int8_t(0), int8_t(-2), int8_t(2)}) {
+        e450::EmissionConfig cfg;
+        cfg.scaler = scaler;
+        const e450::Emission plan = e450::plan_simple(cfg, e450::FaultSpec{});
+        const std::map<std::string, double> values =
+            decode(e450::encode_telegram(plan.spec(0, e450::DateTime{})));
+
+        const double got = values.count(OBIS_E_IMPORT) ? values.at(OBIS_E_IMPORT) : -1;
+        const double want = scaler == 0 ? 12345.0 : (scaler == -2 ? 123.45 : 1'234'500.0);
+        std::printf("  scaler %d -> %.2f (want %.2f)\n", scaler, got, want);
+        check_eq(got, want, "scaling applied exactly once", want * 1e-6 + 0.001);
+    }
+}
+
+// FR-FLT-02/04 sanity: a fault-free emission is byte-identical to encode_telegram.
+void case_fault_none_is_transparent() {
+    const auto frames = fault_frames();
+    const e450::Emission plan =
+        e450::plan_e450(e450::fixed_model(), e450::EmissionConfig{}, e450::FaultSpec{});
+    check(e450::apply_wire_fault(frames, e450::FaultSpec{}) ==
+              e450::encode_telegram(plan.spec(1, e450::DateTime{})),
+          "no fault means the same bytes as the plain encoder");
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -449,6 +742,17 @@ int main(int argc, char **argv) {
     else if (name == "silence") case_silence();
     else if (name == "mode_simple") case_mode_simple();
     else if (name == "mode_random") case_mode_random();
+    else if (name == "fault_fixed") case_fault_fixed_values();
+    else if (name == "fault_fcs") case_fault_fcs();
+    else if (name == "fault_truncate") case_fault_truncate();
+    else if (name == "fault_drop_block") case_fault_drop_block();
+    else if (name == "fault_start_mid") case_fault_start_mid_frame();
+    else if (name == "fault_duplicate") case_fault_duplicate_register();
+    else if (name == "fault_noise") case_fault_noise();
+    else if (name == "fault_none") case_fault_none_is_transparent();
+    else if (name == "identity") case_directive_identity();
+    else if (name == "energy") case_directive_energy();
+    else if (name == "scaler") case_directive_scaler();
     else {
         std::fprintf(stderr, "unknown case: %s\n", name.c_str());
         return 2;

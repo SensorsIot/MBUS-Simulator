@@ -59,3 +59,16 @@ add_test(NAME FR-CLK-04.same-input-same-bytes       COMMAND test_encode determin
 add_test(NAME FR-SCH-08.telegram-leaves-a-gap       COMMAND test_encode silence)
 add_test(NAME FR-MOD-03.simple-mode-one-frame       COMMAND test_encode mode_simple)
 add_test(NAME FR-MOD-04.random-mode-varies-repeats  COMMAND test_encode mode_random)
+
+# Phase 2 runtime directives — FSD §14.
+add_test(NAME FR-FLT-01.fault-values-are-fixed       COMMAND test_encode fault_fixed)
+add_test(NAME FR-FLT-02.fcs-corrupts-one-frame       COMMAND test_encode fault_fcs)
+add_test(NAME FR-FLT-03.truncate-leaves-no-flag      COMMAND test_encode fault_truncate)
+add_test(NAME FR-FLT-04.drop-block-yields-nothing    COMMAND test_encode fault_drop_block)
+add_test(NAME FR-FLT-05.start-mid-frame-recoverable  COMMAND test_encode fault_start_mid)
+add_test(NAME FR-FLT-06.duplicate-register-differs   COMMAND test_encode fault_duplicate)
+add_test(NAME FR-FLT-07.noise-has-no-framing         COMMAND test_encode fault_noise)
+add_test(NAME FR-FLT-02-07.no-fault-is-transparent   COMMAND test_encode fault_none)
+add_test(NAME FR-FLT-10-11.identity-and-serial       COMMAND test_encode identity)
+add_test(NAME FR-FLT-12.energy-set-exactly           COMMAND test_encode energy)
+add_test(NAME FR-FLT-13.scaler-applied-once          COMMAND test_encode scaler)

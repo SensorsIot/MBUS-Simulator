@@ -114,6 +114,9 @@ std::vector<uint8_t> encode_apdu(const TelegramSpec &spec) {
                 apdu.push_back(TAG_UINT32);
                 put_u32(apdu, value.u32);
                 break;
+            case TelegramValue::Kind::Raw:
+                apdu.insert(apdu.end(), value.octets.begin(), value.octets.end());
+                break;
         }
     }
 
@@ -182,19 +185,27 @@ std::vector<uint8_t> frame_hdlc(std::span<const uint8_t> information, const Wire
     return frame;
 }
 
-std::vector<uint8_t> encode_telegram(const TelegramSpec &spec, const WireConfig &wire) {
+std::vector<std::vector<uint8_t>> encode_telegram_frames(const TelegramSpec &spec,
+                                                         const WireConfig &wire) {
     const std::vector<uint8_t> apdu = apply_security(encode_apdu(spec));
     const std::vector<std::vector<uint8_t>> blocks = segment_gbt(apdu, wire.block_payload);
 
-    std::vector<uint8_t> out;
+    std::vector<std::vector<uint8_t>> frames;
+    frames.reserve(blocks.size());
     for (std::size_t index = 0; index < blocks.size(); ++index) {
         std::vector<uint8_t> information;
         // The LLC header appears once per telegram, not once per frame — the
         // continuation frames carry the GBT header directly (FR-ENC-09).
         if (index == 0) information.insert(information.end(), std::begin(LLC), std::end(LLC));
         information.insert(information.end(), blocks[index].begin(), blocks[index].end());
+        frames.push_back(frame_hdlc(information, wire));
+    }
+    return frames;
+}
 
-        const std::vector<uint8_t> frame = frame_hdlc(information, wire);
+std::vector<uint8_t> encode_telegram(const TelegramSpec &spec, const WireConfig &wire) {
+    std::vector<uint8_t> out;
+    for (const std::vector<uint8_t> &frame : encode_telegram_frames(spec, wire)) {
         out.insert(out.end(), frame.begin(), frame.end());
     }
     return out;

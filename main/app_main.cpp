@@ -12,7 +12,10 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "e450/datetime.h"
+#include "e450/directives.h"
 #include "e450/ebl_ci1.h"
+#include "e450/emission.h"
+#include "e450/faults.h"
 #include "e450/modes.h"
 #include "e450/rng.h"
 #include "e450/telegram.h"
@@ -71,6 +74,14 @@ e450::Rng g_rng{e450::MODE3_SEED};
 
 uint32_t g_invoke_id = 0;
 uint32_t g_emissions = 0;
+
+// FSD §14. Persistent directives, and the one-shot fault armed for the next
+// emission. The fault is deliberately not part of EmissionConfig: one is state
+// the operator sets and leaves, the other clears itself, and conflating them is
+// how a corruption silently outlives the case it was armed for.
+e450::EmissionConfig g_cfg;
+e450::FaultSpec g_fault;
+int64_t g_silence_until_us = 0;
 
 struct Lock {
     Lock() { xSemaphoreTake(g_lock, portMAX_DELAY); }
@@ -136,56 +147,83 @@ const char *mode_name(e450::Mode mode) {
 struct Payload {
     std::vector<uint8_t> wire;
     uint32_t id = 0;
+    std::size_t frames = 0;
+    char fault[40] = "none";
     char note[96] = {};
 };
 
-Payload build_payload(e450::Mode mode) {
+Payload build_payload(e450::Mode mode, const e450::EmissionConfig &cfg,
+                      const e450::FaultSpec &fault) {
     Payload out;
+    e450::fault_to_string(fault, out.fault, sizeof(out.fault));
 
-    if (mode == e450::Mode::Pattern) {
+    // FR-FLT-07. Noise replaces the telegram outright — there is nothing to
+    // corrupt because there is nothing valid in it to begin with.
+    if (fault.kind == e450::Fault::Noise) {
+        out.wire = e450::noise_bytes(fault.arg);
+        Lock held;
+        out.id = g_emissions++;
+        std::snprintf(out.note, sizeof(out.note), "garbage=%u", unsigned(fault.arg));
+        return out;
+    }
+
+    if (mode == e450::Mode::Pattern && !fault.armed()) {
         // FR-MOD-02. No protocol at all: 0x55 alternates every bit, so what
         // comes out at the far end reports the line settings and nothing else.
         out.wire.assign(e450::PATTERN_BURST_BYTES, e450::PATTERN_BYTE);
         Lock held;
         out.id = g_emissions++;
-        std::snprintf(out.note, sizeof(out.note), "0x%02X x %u", e450::PATTERN_BYTE,
-                      static_cast<unsigned>(e450::PATTERN_BURST_BYTES));
+        std::snprintf(out.note, sizeof(out.note), "pattern=0x%02X", e450::PATTERN_BYTE);
         return out;
     }
 
-    // `values` must outlive the encode call below — TelegramSpec holds a view of
-    // it, not a copy.
-    std::vector<e450::TelegramValue> values;
-    e450::TelegramSpec spec;
+    // `plan` owns the objects and values; the spec only views them, so it must
+    // not outlive this scope (TelegramSpec::bind_values).
+    e450::Emission plan;
+    uint32_t invoke_id = 0;
+    e450::DateTime when{};
     {
         Lock held;
-        spec.invoke_id = g_invoke_id++;
-        spec.timestamp = g_clock.now();
+        invoke_id = g_invoke_id++;
+        when = g_clock.now();
         out.id = g_emissions++;
 
-        if (mode == e450::Mode::Simple) {
-            spec.objects = e450::simple::objects();
-            values = e450::simple::values();
-            std::snprintf(out.note, sizeof(out.note), "p=%" PRIu32 " W e=%" PRIu32 " Wh",
-                          e450::simple::ACTIVE_POWER_W, e450::simple::ACTIVE_ENERGY_WH);
+        if (fault.armed()) {
+            // FR-FLT-01. A fault always rides on the fixed load, whatever the
+            // mode: an arithmetic assertion cannot be made against a value that
+            // changes every emission, and a fault case exists to be asserted on.
+            const e450::ValueModel fixed = e450::fixed_model();
+            plan = e450::plan_e450(fixed, cfg, fault);
+            std::snprintf(out.note, sizeof(out.note), "pi=%" PRIu32 " ei=%" PRIu32 " fixed=1",
+                          fixed.import_w(), cfg.energy_set ? cfg.energy_wh : fixed.import_wh());
+        } else if (mode == e450::Mode::Simple) {
+            plan = e450::plan_simple(cfg, fault);
+            std::snprintf(out.note, sizeof(out.note), "p=%" PRIu32 " e=%" PRIu32,
+                          e450::simple::ACTIVE_POWER_W,
+                          cfg.energy_set ? cfg.energy_wh : e450::simple::ACTIVE_ENERGY_WH);
         } else {
-            spec.objects = e450::ebl::ci1_objects();
-            values = e450::ebl::ci1_values(g_model);
+            plan = e450::plan_e450(g_model, cfg, fault);
             std::snprintf(out.note, sizeof(out.note),
                           "pi=%" PRIu32 " po=%" PRIu32 " ei=%" PRIu32 " eo=%" PRIu32
                           " i=%" PRIu32,
-                          g_model.import_w(), g_model.export_w(), g_model.import_wh(),
+                          g_model.import_w(), g_model.export_w(),
+                          cfg.energy_set ? cfg.energy_wh : g_model.import_wh(),
                           g_model.export_wh(), g_model.current_ma());
         }
     }
 
-    spec.bind_values(values);
-    out.wire = e450::encode_telegram(spec);
+    const std::vector<std::vector<uint8_t>> frames =
+        e450::encode_telegram_frames(plan.spec(invoke_id, when));
+    out.wire = e450::apply_wire_fault(frames, fault);
+    out.frames = frames.size();
+    if (fault.kind == e450::Fault::DropBlock && fault.arg <= out.frames && out.frames > 0) {
+        --out.frames;
+    }
     return out;
 }
 
-void emit(e450::Mode mode) {
-    const Payload payload = build_payload(mode);
+void emit(e450::Mode mode, const e450::EmissionConfig &cfg, const e450::FaultSpec &fault) {
+    const Payload payload = build_payload(mode, cfg, fault);
 
     // Blocking, deliberately. At 2400 baud a telegram takes about 1.7 s, and the
     // next tick is 5 s away — but more importantly this is what makes FR-SCH-06
@@ -204,12 +242,20 @@ void emit(e450::Mode mode) {
     // The silence figure is here rather than only at boot because it is the one
     // number that decides whether the line carries two emissions or one merged
     // burst (FR-SCH-08), and it moves whenever the payload does.
-    const int32_t silence = e450::silence_ms(payload.wire.size(), PUSH_PERIOD_SECONDS * 1000);
+    // FR-FLT-14: strictly key=value, so a bench script can assert on what was
+    // emitted rather than infer it. "Frame 2 of 3 was corrupted" has to be a
+    // statement the simulator makes, or the only available observation is that
+    // something downstream discarded something.
+    const uint32_t period_ms = cfg.gap_ms > 0
+                                   ? e450::wire_time_ms(payload.wire.size()) + cfg.gap_ms
+                                   : static_cast<uint32_t>(PUSH_PERIOD_SECONDS) * 1000u;
+    const int32_t silence = e450::silence_ms(payload.wire.size(), period_ms);
     ESP_LOGI(TAG,
-             "%s %" PRIu32 ": %u bytes on GPIO%d, %" PRIu32 " ms on the wire, %" PRId32
-             " ms silent - %s",
-             mode_name(mode), payload.id, static_cast<unsigned>(payload.wire.size()),
-             CONFIG_SIM_MBUS_TX_GPIO, e450::wire_time_ms(payload.wire.size()), silence,
+             "emit n=%" PRIu32 " mode=%s fault=%s bytes=%u frames=%u wire_ms=%" PRIu32
+             " silent_ms=%" PRId32 " gpio=%d %s",
+             payload.id, mode_name(mode), payload.fault,
+             static_cast<unsigned>(payload.wire.size()), static_cast<unsigned>(payload.frames),
+             e450::wire_time_ms(payload.wire.size()), silence, CONFIG_SIM_MBUS_TX_GPIO,
              payload.note);
 
     // FR-SCH-08. Loud, and only once: a periodic error line would bury the log
@@ -217,7 +263,7 @@ void emit(e450::Mode mode) {
     // bursts that merge — which looks like a decode fault at the far end and
     // gets debugged there, wrongly.
     static bool complained = false;
-    if (silence < e450::MIN_SILENCE_MS && !complained) {
+    if (silence < e450::MIN_SILENCE_MS && cfg.gap_ms == 0 && !complained) {
         complained = true;
         ESP_LOGE(TAG,
                  "only %" PRId32 " ms of silence between emissions, want >= %" PRId32 " ms: "
@@ -230,6 +276,7 @@ void emit(e450::Mode mode) {
 [[noreturn]] void scheduler_task(void *) {
     int64_t last_us = esp_timer_get_time();
     int last_emitted_second = -1;
+    int64_t next_free_run_us = 0;
 
     for (;;) {
         const int64_t now_us = esp_timer_get_time();
@@ -242,27 +289,56 @@ void emit(e450::Mode mode) {
 
         bool due = false;
         e450::Mode mode = e450::Mode::E450;
+        e450::EmissionConfig cfg;
+        e450::FaultSpec fault;
         {
             Lock held;
             const e450::DateTime now = g_clock.now();
             mode = g_mode;
-            if ((now.second % PUSH_PERIOD_SECONDS == 0) && (now.second != last_emitted_second)) {
+            cfg = g_cfg;
+            fault = g_fault;
+
+            if (now_us < g_silence_until_us) {
+                // FR-FLT-09. Silence is a capability, not the absence of one:
+                // the clock keeps running, the console keeps answering, and
+                // nothing reaches the line. Consume the boundary so that the
+                // first telegram after the silence lands on the schedule rather
+                // than immediately.
+                if (now.second % PUSH_PERIOD_SECONDS == 0) last_emitted_second = now.second;
+            } else if (cfg.gap_ms > 0) {
+                // FR-FLT-08. Free-running: the gap is measured from the last
+                // byte out to the first byte of the next telegram, which is the
+                // only way to place a boundary at 1999 vs 2000 ms. Wall-clock
+                // alignment (FR-SCH-01) is deliberately suspended while set.
+                due = (now_us >= next_free_run_us);
+            } else if ((now.second % PUSH_PERIOD_SECONDS == 0) &&
+                       (now.second != last_emitted_second)) {
                 last_emitted_second = now.second;
                 due = true;
+            }
 
-                if (mode == e450::Mode::E450) {
-                    // FR-MOD-04, and the order matters. Choosing the load before
-                    // integrating means the energy this telegram reports is
-                    // exactly the power this telegram reports, multiplied by the
-                    // period — so the arithmetic can be checked against a
-                    // single message, with no reference to what came before.
-                    e450::apply_random_load(g_model, g_rng);
-                    g_model.tick(PUSH_PERIOD_SECONDS * 1000);  // FR-SCH-03
-                }
+            if (due && mode == e450::Mode::E450 && !fault.armed()) {
+                // FR-MOD-04, and the order matters. Choosing the load before
+                // integrating means the energy this telegram reports is exactly
+                // the power this telegram reports, multiplied by the period — so
+                // the arithmetic can be checked against a single message, with
+                // no reference to what came before.
+                e450::apply_random_load(g_model, g_rng);
+                g_model.tick(PUSH_PERIOD_SECONDS * 1000);  // FR-SCH-03
             }
         }
 
-        if (due) emit(mode);
+        if (due) {
+            emit(mode, cfg, fault);
+            Lock held;
+            // FR-FLT-01: one fault, one telegram. A sticky corruption poisons
+            // every later case in a run, so it clears itself here rather than
+            // waiting to be cleared by an operator who may forget.
+            g_fault = e450::FaultSpec{};
+            if (cfg.gap_ms > 0) {
+                next_free_run_us = esp_timer_get_time() + static_cast<int64_t>(cfg.gap_ms) * 1000;
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(SCHEDULER_POLL_MS));
     }
 }
@@ -331,15 +407,36 @@ int cmd_mode(int argc, char **argv) {
 
 // FR-CLI-04: one machine-parsable line, so a test script can assert on it
 // without a parser.
+const char *identity_name(e450::Identity id) {
+    switch (id) {
+        case e450::Identity::Ldn: return "ldn";
+        case e450::Identity::DevId: return "devid";
+        case e450::Identity::None: return "none";
+    }
+    return "?";
+}
+
 int cmd_status(int, char **) {
     Lock held;
     const e450::DateTime now = g_clock.now();
+    const int64_t left_us = g_silence_until_us - esp_timer_get_time();
+    const int silence_left = left_us > 0 ? static_cast<int>(left_us / 1000000) : 0;
+    char fault_text[40];
+    e450::fault_to_string(g_fault, fault_text, sizeof(fault_text));
+    char energy_text[16];
+    if (g_cfg.energy_set) {
+        std::snprintf(energy_text, sizeof(energy_text), "%" PRIu32, g_cfg.energy_wh);
+    } else {
+        std::snprintf(energy_text, sizeof(energy_text), "auto");
+    }
     // PRIu32 rather than %u: uint32_t is `long unsigned int` on Xtensa, and
     // -Werror=format catches the mismatch that would be silent on the host.
     std::printf(
         "OK pi=%" PRIu32 " po=%" PRIu32 " pf=%.2f%s ei=%" PRIu32 " eo=%" PRIu32 " q1=%" PRIu32
         " q2=%" PRIu32 " q3=%" PRIu32 " q4=%" PRIu32 " i=%" PRIu32
-        " time=%04u-%02u-%02uT%02u:%02u:%02u mode=%d/%s period=%d emissions=%" PRIu32 "\n",
+        " time=%04u-%02u-%02uT%02u:%02u:%02u mode=%d/%s period=%d gap=%" PRIu32
+        " silence=%d serial=%u identity=%s scaler=%d energy=%s fault=%s"
+        " emissions=%" PRIu32 "\n",
         g_model.import_w(), g_model.export_w(), static_cast<double>(g_model.power_factor()),
         g_model.lagging() ? "" : "L", g_model.import_wh(), g_model.export_wh(),
         g_model.reactive_varh(e450::ValueModel::Q1_IMPORT_LAGGING),
@@ -347,7 +444,178 @@ int cmd_status(int, char **) {
         g_model.reactive_varh(e450::ValueModel::Q3_EXPORT_LEADING),
         g_model.reactive_varh(e450::ValueModel::Q4_IMPORT_LEADING), g_model.current_ma(), now.year,
         now.month, now.day, now.hour, now.minute, now.second, static_cast<int>(g_mode),
-        mode_name(g_mode), PUSH_PERIOD_SECONDS, g_emissions);
+        mode_name(g_mode), PUSH_PERIOD_SECONDS, g_cfg.gap_ms, silence_left, g_cfg.serial_chars,
+        identity_name(g_cfg.identity), g_cfg.scaler, energy_text, fault_text, g_emissions);
+    return 0;
+}
+
+// FSD §14 — the runtime directives. Every one of them is here rather than in
+// Kconfig on purpose: a fault that needs a rebuild makes the firmware image part
+// of the test fixture, and a bench run then cannot say which simulator produced
+// its evidence.
+
+bool parse_long(const char *text, long lo, long hi, long *out) {
+    char *end = nullptr;
+    const long v = std::strtol(text, &end, 10);
+    if (end == text || *end != 0 || v < lo || v > hi) return false;
+    *out = v;
+    return true;
+}
+
+// "1.1.1.8.0.255" — the spelling a decoder prints, so an operator can paste back
+// what they just read rather than translating it.
+bool parse_obis(const char *text, std::array<uint8_t, 6> *out) {
+    unsigned a, b, c, d, e, f;
+    if (std::sscanf(text, "%u.%u.%u.%u.%u.%u", &a, &b, &c, &d, &e, &f) != 6) return false;
+    const unsigned parts[6] = {a, b, c, d, e, f};
+    for (unsigned v : parts) {
+        if (v > 255) return false;
+    }
+    for (int i = 0; i < 6; ++i) (*out)[i] = static_cast<uint8_t>(parts[i]);
+    return true;
+}
+
+int cmd_fault(int argc, char **argv) {
+    char text[40];
+    if (argc < 2) {
+        Lock held;
+        std::printf("OK %s\n", e450::fault_to_string(g_fault, text, sizeof(text)));
+        return 0;
+    }
+
+    e450::FaultSpec f;
+    const char *what = argv[1];
+    long n = 0;
+
+    if (std::strcmp(what, "none") == 0) {
+        // f stays cleared
+    } else if (std::strcmp(what, "start-mid-frame") == 0) {
+        f.kind = e450::Fault::StartMidFrame;
+    } else if (std::strcmp(what, "duplicate-register") == 0) {
+        if (argc < 3 || !parse_obis(argv[2], &f.obis)) {
+            std::printf("ERR usage: fault duplicate-register <a.b.c.d.e.f>\n");
+            return 1;
+        }
+        f.kind = e450::Fault::DuplicateRegister;
+    } else if (std::strcmp(what, "fcs") == 0 || std::strcmp(what, "truncate") == 0 ||
+               std::strcmp(what, "drop-block") == 0) {
+        if (argc < 3 || !parse_long(argv[2], 1, 16, &n)) {
+            std::printf("ERR usage: fault %s <1..16>\n", what);
+            return 1;
+        }
+        f.kind = std::strcmp(what, "fcs") == 0          ? e450::Fault::Fcs
+                 : std::strcmp(what, "truncate") == 0   ? e450::Fault::Truncate
+                                                        : e450::Fault::DropBlock;
+        f.arg = static_cast<uint32_t>(n);
+    } else if (std::strcmp(what, "noise") == 0) {
+        if (argc < 3 || !parse_long(argv[2], 1, 2048, &n)) {
+            std::printf("ERR usage: fault noise <1..2048>\n");
+            return 1;
+        }
+        f.kind = e450::Fault::Noise;
+        f.arg = static_cast<uint32_t>(n);
+    } else {
+        std::printf("ERR unknown fault '%s'\n", what);
+        return 1;
+    }
+
+    {
+        Lock held;
+        g_fault = f;
+    }
+    std::printf("OK %s armed for the next telegram\n",
+                e450::fault_to_string(f, text, sizeof(text)));
+    return 0;
+}
+
+int cmd_gap(int argc, char **argv) {
+    long ms = 0;
+    if (argc < 2 || !parse_long(argv[1], 0, 60000, &ms)) {
+        std::printf("ERR usage: gap <0..60000 ms>  (0 restores the %d s schedule)\n",
+                    PUSH_PERIOD_SECONDS);
+        return 1;
+    }
+    Lock held;
+    g_cfg.gap_ms = static_cast<uint32_t>(ms);
+    std::printf("OK gap=%ld%s\n", ms, ms == 0 ? " (clock-aligned)" : " (free-running)");
+    return 0;
+}
+
+int cmd_silence(int argc, char **argv) {
+    long seconds = 0;
+    if (argc < 2 || !parse_long(argv[1], 0, 3600, &seconds)) {
+        std::printf("ERR usage: silence <0..3600 seconds>\n");
+        return 1;
+    }
+    Lock held;
+    g_silence_until_us = esp_timer_get_time() + static_cast<int64_t>(seconds) * 1000000;
+    std::printf("OK silent for %ld s\n", seconds);
+    return 0;
+}
+
+int cmd_serial(int argc, char **argv) {
+    long chars = 0;
+    if (argc < 2 || !parse_long(argv[1], 8, 16, &chars) || (chars != 8 && chars != 16)) {
+        std::printf("ERR usage: serial <8|16>\n");
+        return 1;
+    }
+    Lock held;
+    g_cfg.serial_chars = static_cast<uint8_t>(chars);
+    std::printf("OK serial=%ld\n", chars);
+    return 0;
+}
+
+int cmd_identity(int argc, char **argv) {
+    if (argc < 2) {
+        std::printf("ERR usage: identity <ldn|devid|none>\n");
+        return 1;
+    }
+    e450::Identity id;
+    if (std::strcmp(argv[1], "ldn") == 0) {
+        id = e450::Identity::Ldn;
+    } else if (std::strcmp(argv[1], "devid") == 0) {
+        id = e450::Identity::DevId;
+    } else if (std::strcmp(argv[1], "none") == 0) {
+        id = e450::Identity::None;
+    } else {
+        std::printf("ERR usage: identity <ldn|devid|none>\n");
+        return 1;
+    }
+    Lock held;
+    g_cfg.identity = id;
+    std::printf("OK identity=%s\n", argv[1]);
+    return 0;
+}
+
+int cmd_energy(int argc, char **argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "auto") == 0) {
+        Lock held;
+        g_cfg.energy_set = false;
+        std::printf("OK energy=auto\n");
+        return 0;
+    }
+    char *end = nullptr;
+    const unsigned long wh = (argc >= 2) ? std::strtoul(argv[1], &end, 10) : 0;
+    if (argc < 2 || end == argv[1] || *end != 0 || wh > 4294967295UL) {
+        std::printf("ERR usage: energy <wh> | auto\n");
+        return 1;
+    }
+    Lock held;
+    g_cfg.energy_set = true;
+    g_cfg.energy_wh = static_cast<uint32_t>(wh);
+    std::printf("OK energy=%lu\n", wh);
+    return 0;
+}
+
+int cmd_scaler(int argc, char **argv) {
+    long n = 0;
+    if (argc < 2 || !parse_long(argv[1], -9, 9, &n)) {
+        std::printf("ERR usage: scaler <-9..9>  (0 restores bare values)\n");
+        return 1;
+    }
+    Lock held;
+    g_cfg.scaler = static_cast<int8_t>(n);
+    std::printf("OK scaler=%ld\n", n);
     return 0;
 }
 
@@ -362,6 +630,16 @@ void register_commands() {
         {"mode", "mode [1|2|3] - 1 pattern, 2 simple telegram, 3 full E450", &cmd_mode},
         {"status", "print the whole state as one key=value line", &cmd_status},
         {"set", "set time <YYYY-MM-DDTHH:MM:SS>", &cmd_set},
+        {"fault",
+         "fault [none|fcs N|truncate N|drop-block N|start-mid-frame|"
+         "duplicate-register OBIS|noise N] - one telegram, then clears",
+         &cmd_fault},
+        {"gap", "gap <ms> - silence between telegrams; 0 restores the schedule", &cmd_gap},
+        {"silence", "silence <seconds> - emit nothing, keep running", &cmd_silence},
+        {"serial", "serial <8|16> - length of the identity serial", &cmd_serial},
+        {"identity", "identity <ldn|devid|none> - which identity object appears", &cmd_identity},
+        {"energy", "energy <wh>|auto - set the cumulative import register", &cmd_energy},
+        {"scaler", "scaler <-9..9> - emit values with a scaler; 0 for bare", &cmd_scaler},
     };
 
     // Zero-initialise and assign rather than brace-initialise: esp_console_cmd_t

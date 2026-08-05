@@ -26,7 +26,7 @@ struct CaptureObject {
 // the object list, the logical name (an octet string), and every register (a
 // uint32 in W, Wh, mA or varh — FR-ENC-04, no scaler on the wire).
 struct TelegramValue {
-    enum class Kind : uint8_t { ObjectListArray, OctetString, Uint32 };
+    enum class Kind : uint8_t { ObjectListArray, OctetString, Uint32, Raw };
 
     Kind kind = Kind::Uint32;
     uint32_t u32 = 0;
@@ -37,6 +37,19 @@ struct TelegramValue {
         return {Kind::OctetString, 0, {bytes.begin(), bytes.end()}};
     }
     static TelegramValue uint32(uint32_t v) { return {Kind::Uint32, v, {}}; }
+
+    // A-XDR bytes copied through verbatim, tag included. For shapes the three
+    // kinds above cannot express — a Register's attribute 3, which is a
+    // structure of scaler and unit rather than a single value (FR-FLT-11).
+    static TelegramValue raw(std::vector<uint8_t> bytes) {
+        return {Kind::Raw, 0, std::move(bytes)};
+    }
+
+    // COSEM scaler_unit: structure[2] { integer8 scaler, enum unit }. The value
+    // a reader should report is `raw x 10^scaler`, applied once.
+    static TelegramValue scaler_unit(int8_t scaler, uint8_t unit) {
+        return raw({0x02, 0x02, 0x0F, static_cast<uint8_t>(scaler), 0x16, unit});
+    }
 };
 
 struct TelegramSpec {
@@ -55,6 +68,8 @@ struct TelegramSpec {
     // rvalue overload is deleted, so the mistake is a compile error.
     void bind_values(const std::vector<TelegramValue> &owned) { values = owned; }
     void bind_values(std::vector<TelegramValue> &&) = delete;
+    void bind_objects(const std::vector<CaptureObject> &owned) { objects = owned; }
+    void bind_objects(std::vector<CaptureObject> &&) = delete;
 };
 
 // Wire-layer constants. Every default was measured from e450_serial8.hex and
@@ -119,7 +134,13 @@ std::vector<std::vector<uint8_t>> segment_gbt(std::span<const uint8_t> apdu,
 std::vector<uint8_t> frame_hdlc(std::span<const uint8_t> information,
                                 const WireConfig &wire);
 
-// The whole pipeline: one telegram, ready for the UART.
+// The whole pipeline, one entry per HDLC frame. Faults need the boundaries
+// (FR-FLT-02..05), and a test that asserts "three frames" needs them too — both
+// are impossible once the frames are concatenated.
+std::vector<std::vector<uint8_t>> encode_telegram_frames(const TelegramSpec &spec,
+                                                         const WireConfig &wire = {});
+
+// The same telegram as one byte stream, ready for the UART.
 std::vector<uint8_t> encode_telegram(const TelegramSpec &spec, const WireConfig &wire = {});
 
 }  // namespace e450
