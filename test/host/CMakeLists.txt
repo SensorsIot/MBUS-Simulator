@@ -4,9 +4,9 @@
 #   cmake --build build/host
 #   ctest --test-dir build/host --output-on-failure
 #
-# The oracle is dlms_parser at the tag gplug-mini pins (FR-DEC-01 over there), so
-# a pass here means the decoder the DUT actually runs can read what the encoder
-# produces. Pinned to a tag, not a branch: this exists to notice when the
+# The oracle is dlms_parser, an independent DLMS decoder, so a pass here means
+# something we did not write can read what the encoder produces. Pinned to a tag,
+# not a branch: this exists to notice when the
 # library's behaviour changes, which it cannot do if the library moves underneath
 # it.
 cmake_minimum_required(VERSION 3.22)
@@ -45,7 +45,7 @@ enable_testing()
 
 # One CTest entry per case, so a failure names the property that broke rather
 # than "the encode test". The name carries the FSD requirement it discharges.
-add_test(NAME FR-ENC-01-04.decodes-with-dut-decoder COMMAND test_encode decode)
+add_test(NAME FR-ENC-01-04.decodes-independently    COMMAND test_encode decode)
 add_test(NAME FR-ENC-05.invoke-id-increments        COMMAND test_encode invoke_id)
 add_test(NAME FR-ENC-06-07.gbt-block-structure      COMMAND test_encode gbt)
 add_test(NAME FR-ENC-07.block-size-invariant        COMMAND test_encode block_size)

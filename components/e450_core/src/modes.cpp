@@ -12,7 +12,7 @@ constexpr int8_t ATTR_VALUE = 2;
 
 constexpr CaptureObject OBJECTS[OBJECT_COUNT] = {
     // The push setup, whose value is the object list itself. Without it the
-    // values that follow are unlabelled numbers and no reader can place them.
+    // values that follow are unlabelled numbers that nothing can place.
     {CLASS_PUSH_SETUP, {0, 8, 25, 9, 0, 0xFF}, ATTR_VALUE, 0},
     // Wirkleistungsbezug +P, watts.
     {CLASS_REGISTER, {1, 0, 1, 7, 0, 0xFF}, ATTR_VALUE, 0},
@@ -45,7 +45,7 @@ void apply_random_load(ValueModel &model, Rng &rng) {
     model.set_export_w(exporting ? watts : 0);
 
     // 0.85 to 1.00 inclusive, lagging — an ordinary inductive load. Anything
-    // below 1.00 puts the quadrant accumulators to work, so a reader that
+    // below 1.00 puts the quadrant accumulators to work, so a decoder that
     // ignores reactive energy is caught here rather than in the field.
     const uint32_t hundredths = rng.in_range(85, 100);
     model.set_power_factor(static_cast<float>(hundredths) / 100.0F, true);

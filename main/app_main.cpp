@@ -66,7 +66,7 @@ SemaphoreHandle_t g_tx_lock = nullptr;
 e450::Mode g_mode = e450::Mode::E450;
 
 // FR-MOD-04. Seeded once at boot and never reseeded, so a run from reset
-// replays byte for byte (FR-CLK-04) while still being unpredictable to a reader.
+// replays byte for byte (FR-CLK-04) while still being unpredictable downstream.
 e450::Rng g_rng{e450::MODE3_SEED};
 
 uint32_t g_invoke_id = 0;
@@ -86,7 +86,7 @@ void configure_meter_link() {
     // either way it is the UART's idle level, computed here from the same
     // constant. Between reset and uart_set_pin() the pin is a floating input, so
     // without driving it here the bus level is undefined on every reboot and the
-    // reader sees a break condition or noise instead of a quiet line.
+    // bus carries a break condition or noise instead of resting quiet.
     gpio_config_t idle = {};
     idle.pin_bit_mask = 1ULL << TX_GPIO;
     idle.mode = GPIO_MODE_OUTPUT;
@@ -131,8 +131,8 @@ const char *mode_name(e450::Mode mode) {
 // What this mode puts on the line, plus a description of what is in it.
 //
 // The description is not decoration. In mode 3 the values change every emission,
-// so the only way to check a reader is to compare what it reported against what
-// was actually sent — and this line is that record.
+// so the only way to check a decode is to compare it against what was actually
+// sent — and this line is that record.
 struct Payload {
     std::vector<uint8_t> wire;
     uint32_t id = 0;
@@ -202,7 +202,7 @@ void emit(e450::Mode mode) {
     // every period puts the fault after the pin, its absence puts it before.
     //
     // The silence figure is here rather than only at boot because it is the one
-    // number that decides whether the reader sees two emissions or one merged
+    // number that decides whether the line carries two emissions or one merged
     // burst (FR-SCH-08), and it moves whenever the payload does.
     const int32_t silence = e450::silence_ms(payload.wire.size(), PUSH_PERIOD_SECONDS * 1000);
     ESP_LOGI(TAG,
@@ -214,16 +214,16 @@ void emit(e450::Mode mode) {
 
     // FR-SCH-08. Loud, and only once: a periodic error line would bury the log
     // it is trying to qualify, but a silent one lets the rig go on producing
-    // bursts the reader merges — which looks like a decode fault at the far end
-    // and gets debugged there, wrongly.
+    // bursts that merge — which looks like a decode fault at the far end and
+    // gets debugged there, wrongly.
     static bool complained = false;
     if (silence < e450::MIN_SILENCE_MS && !complained) {
         complained = true;
         ESP_LOGE(TAG,
                  "only %" PRId32 " ms of silence between emissions, want >= %" PRId32 " ms: "
-                 "the reader ends a transmission after %" PRId32 " ms of quiet, so consecutive "
+                 "a transmission ends after %" PRId32 " ms of quiet, so consecutive "
                  "emissions may be read as one. Raise SIM_PUSH_PERIOD_SECONDS.",
-                 silence, e450::MIN_SILENCE_MS, e450::DUT_BURST_TIMEOUT_MS);
+                 silence, e450::MIN_SILENCE_MS, e450::BURST_TIMEOUT_MS);
     }
 }
 
@@ -254,7 +254,7 @@ void emit(e450::Mode mode) {
                     // FR-MOD-04, and the order matters. Choosing the load before
                     // integrating means the energy this telegram reports is
                     // exactly the power this telegram reports, multiplied by the
-                    // period — so a reader can check the arithmetic against a
+                    // period — so the arithmetic can be checked against a
                     // single message, with no reference to what came before.
                     e450::apply_random_load(g_model, g_rng);
                     g_model.tick(PUSH_PERIOD_SECONDS * 1000);  // FR-SCH-03
@@ -324,7 +324,7 @@ int cmd_mode(int argc, char **argv) {
     }
     // Takes effect at the next period boundary, not immediately: an emission
     // already on the wire is left to finish, because truncating it would hand
-    // the reader a malformed frame and a fault that is not real.
+    // out a malformed frame and a fault that is not real.
     std::printf("OK %ld %s\n", which, mode_name(mode));
     return 0;
 }

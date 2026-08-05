@@ -4,9 +4,8 @@
 |---|---|
 | **Status** | Draft — requirements specified, none verified |
 | **Target** | ESP32 (classic, Xtensa), ESP-IDF v6.0.2 |
-| **Peer under test** | [`gplug-mini`](https://github.com/SensorsIot/gplug-mini) — ESP32-C3 M-Bus/DLMS reader |
 | **Complexity** | Low–Medium — one protocol, one output pin, no network |
-| **Provenance legend** | `[user]` decided in the design interview · `[derived]` follows from another requirement · `[capture]` measured from a real E450 telegram · `[doc:EBL]` EBL Liestal parametrisation · `[doc:LG]` Landis+Gyr *Standard CIP-Liste*, 16 Sep 2024 · `[doc:DUT]` the reader's stated line and framing expectations · `[measured]` established on the bench, against the behaviour it describes |
+| **Provenance legend** | `[user]` decided in the design interview · `[derived]` follows from another requirement · `[capture]` measured from a real E450 telegram · `[doc:EBL]` EBL Liestal parametrisation · `[doc:LG]` Landis+Gyr *Standard CIP-Liste*, 16 Sep 2024  · `[measured]` established on the bench, against the behaviour it describes |
 
 > **Plane note.** WHAT (this document) and OPERATE
 > ([the manual](../UserDocumentation/MBUS-Simulator-Manual.md)) exist; there is no
@@ -26,12 +25,13 @@
 
 An ESP32 that behaves, on the wire, like the customer information interface (CII)
 of a Landis+Gyr E450 smart meter as parametrised by **EBL Liestal**, so that
-`gplug-mini` can be developed and regression-tested without a physical meter.
+software which consumes that interface can be developed and regression-tested
+without a physical meter.
 
 ### 1.2 Problem statement
 
-The gPlug is a passive listener on a meter it cannot influence. Development
-against the real meter is therefore slow and unrepeatable: the values are
+A meter's customer interface is a one-way broadcast that cannot be influenced.
+Development against a real meter is therefore slow and unrepeatable: the values are
 whatever the household is doing, the meter cannot be asked to produce a
 particular reading, and the interesting cases — a burst interrupted by a power
 cycle, a counter at a specific value — cannot be provoked at all. Two recorded
@@ -40,8 +40,8 @@ be driven, cannot be timed, and does not exercise a UART.
 
 ### 1.3 Users
 
-One: the developer of `gplug-mini`, operating the simulator from a serial console
-or from a `WorkbenchDriver` test script.
+One: whoever is building something that consumes an E450 customer interface,
+operating the simulator from a serial console or from a test script.
 
 ### 1.4 Goals
 
@@ -49,8 +49,8 @@ or from a `WorkbenchDriver` test script.
    v2.1.0 decodes without error.
 2. Emit **self-consistent** power and energy: the energy counters are the
    integral of the transmitted power.
-3. Be **steerable at runtime** — pick one of three modes (§13) and observe what the
-   DUT reports.
+3. Be **steerable at runtime** — pick one of three modes (§13) and observe what
+   comes out.
 4. Be **deterministic** — the same commands produce the same bytes.
 
 ### 1.5 Non-goals
@@ -71,7 +71,7 @@ console CLI ──► mode (§13) ──► push scheduler ──► telegram en
                                               12/24 V M-Bus driver ◄─────────┘
                                                       │     (non-inverting)
                                                       ▼
-                                       reader ──────► dlms_parser v2.1.0
+                                       whatever is listening,
                                        powered from the bus
 ```
 
@@ -88,13 +88,13 @@ console CLI ──► mode (§13) ──► push scheduler ──► telegram en
 | Console UART | UART0 (GPIO1/GPIO3), 115200 8N1 | `[derived]` |
 | Line parameters | 2400 baud, 8 data bits, **even** parity, 1 stop bit | `[doc:LG]` §3.1 |
 | Driver stage | External, **non-inverting**, logic → 12/24 V M-Bus levels | `[user]`, `[measured]` |
-| DUT supply | **The M-Bus signal itself.** No separate rail, nothing switchable | `[user]` |
+| Downstream supply | **The M-Bus signal itself.** No separate rail, nothing switchable | `[user]` |
 
-The DUT has no independent supply: it draws its power from the bus, so the 24 V
-mark state FR-LNK-04 requires the idle line to hold is not merely a signalling
-level — it is the DUT's supply. A rig that leaves the line at 12 V, or floating
-from reset until `app_main` runs (FR-LNK-05), starves the reader as well as
-misframing it. `[derived]`
+An M-Bus slave draws its power from the bus, so the 24 V mark state FR-LNK-04
+requires the idle line to hold is not merely a signalling level — it is the
+supply. A rig that leaves the line at 12 V, or floating from reset until
+`app_main` runs (FR-LNK-05), starves whatever is connected as well as misframing
+it. `[derived]`
 
 ### 2.2 Component layering
 
@@ -135,11 +135,10 @@ live. **Exit:** `mode 1` reads back as `0x55` at the far end (FR-MOD-02), and a
 logic analyser or a second ESP32 receives the same bytes the host test produced,
 with no framing or parity errors.
 
-### 3.3 Phase 3 — Against the DUT
+### 3.3 Phase 3 — On the bus
 
-Simulator drives a real reader through the interface. **Exit:** all three modes
-behave as §13 requires — the reader echoes the pattern, decodes the fixed values
-of mode 2, and tracks mode 3's changing load telegram by telegram.
+Simulator drives the interface board and a real bus. **Exit:** all three modes
+behave as §13 requires, confirmed by a 2400 8E1 capture of the line.
 
 ---
 
@@ -150,7 +149,7 @@ of mode 2, and tracks mode 3's changing load telegram by telegram.
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | Encoder and decoder are wrong in the same direction | Medium | Tests pass against a wire a real meter would never produce | The oracle is `dlms_parser`, which is independently validated against two real captures. Byte-exact reproduction of `e450_serial8.hex` remains available if a field discrepancy appears |
-| TX pin floating between reset and UART init | High | Undefined bus level; DUT sees a break or garbage on every simulator reboot | FR-LNK-05 |
+| TX pin floating between reset and UART init | High | Undefined bus level; a break condition or garbage on the bus at every simulator reboot | FR-LNK-05 |
 | The TX pin is not free on another ESP32 module | Low | WROVER wires GPIO16/17 to the SPI PSRAM, where both APIs succeed and the pin stays dead. This board is a WROOM | FR-LNK-01 makes the pin Kconfig |
 | Energy truncated to whole Wh per tick | High | At 777 W, 7 % of energy silently lost; at 300 W, 42 % | FR-MDL-04 |
 | EBL enables message security later | Low | Simulator output no longer resembles the meter | §7 keeps the security stage as an identity function in the pipeline, not an absence |
@@ -173,7 +172,7 @@ of mode 2, and tracks mode 3's changing load telegram by telegram.
 
 Message security (AES-GCM-128) · the 15 s, 1 min and 15 min push lists · M-Bus
 sub-meter channels `0-n:24.x` · the optical port · receiving anything from the
-DUT · WiFi, MQTT, OTA, NVS persistence · **fault injection** (corrupted CRC,
+the bus · WiFi, MQTT, OTA, NVS persistence · **fault injection** (corrupted CRC,
 truncated bursts) — v1 emits only valid telegrams `[user]`.
 
 ### 4.4 Dependencies
@@ -181,7 +180,7 @@ truncated bursts) — v1 emits only valid telegrams `[user]`.
 | Dependency | Version | Why |
 |---|---|---|
 | ESP-IDF | v6.0.2 | Matches the toolchain already pinned in CI |
-| `esphome-libs/dlms_parser` | **v2.1.0** | Host-tier oracle — the exact tag `gplug-mini` pins, so a host pass means a device pass |
+| `esphome-libs/dlms_parser` | **v2.1.0** | Host-tier oracle — an independent DLMS decoder, so a host pass means the output is decodable by something we did not write |
 | `e450_serial8.hex`, `e450_serial16.hex` | — | Source of every wire constant in Appendix B |
 
 ---
@@ -241,21 +240,21 @@ schedules; **v1 implements Consumer Information 1 (the 5 s list) only** `[user]`
 | **FR-SCH-05** | ~~Must~~ | `deprecated` 2026-08-05 — `burst` is removed. Every mode emits on the same period, so a forced emission has nothing left to disturb. | `[user]` |
 | **FR-SCH-06** | Must | If a telegram is still transmitting when the next tick falls due, the scheduler shall queue the new telegram and transmit it on completion, never interleaving two telegrams on the line. | `[derived]` |
 | **FR-SCH-07** | Should | The architecture shall admit additional push setups with independent object lists and schedules without altering §7. | `[user]` |
-| **FR-SCH-08** | Must | Between the last byte of one telegram and the first byte of the next the line shall be silent for at least **3000 ms**, and never less than the 2000 ms in which the DUT declares a transmission ended. | `[doc:DUT]` |
+| **FR-SCH-08** | Must | Between the last byte of one telegram and the first byte of the next the line shall be silent for at least **3000 ms**, and never less than the 2000 ms that conventionally delimits one transmission from the next. | `[derived]` |
 
 > **On FR-SCH-06.** The 13-object list is 381 bytes on the wire, **1747 ms at
 > 218 byte/s** — inside 5 s. The requirement exists because the design must not
 > *depend* on that: the moment a second push list is enabled, transmissions
-> collide, and a real meter serialises them into what the DUT sees as one merged
+> collide, and a real meter serialises them into what arrives as one merged
 > burst. `[derived]`
 
 > **On FR-SCH-08 — why the gap is a requirement and not a consequence.** The
-> reader does not delimit transmissions by counting frames; it decodes when the
-> line has been quiet for 2000 ms. So the silence is load-bearing, and it is
+> receiving end of an M-Bus link does not delimit transmissions by counting
+> frames; it decodes once the line has been quiet, conventionally for 2000 ms. So the silence is load-bearing, and it is
 > whatever the period has left over after the telegram — which makes it a
 > property of the *telegram size*, a number nobody chose deliberately. At a 5 s
 > period the budget is **436 bytes** for the 3000 ms target and **654 bytes**
-> before the reader starts merging cycles; the CI1 list uses 381. That is 55
+> before consecutive telegrams start merging; the CI1 list uses 381. That is 55
 > bytes of headroom, and FR-SCH-07's additional push setups would spend it at
 > once.
 >
@@ -265,7 +264,7 @@ schedules; **v1 implements Consumer Information 1 (the 5 s list) only** `[user]`
 > fixed-width encoding and the telegram is 381 bytes whatever the model holds.
 > The firmware logs the gap on every telegram and raises one `E`-level line if
 > it is short. Without those, a telegram that grew past the budget would present
-> as a decode fault in the reader and be debugged there. `[derived]`
+> as a decode fault downstream and be debugged in the wrong place. `[derived]`
 
 ### 6.3 Verification contracts
 
@@ -276,7 +275,7 @@ schedules; **v1 implements Consumer Information 1 (the 5 s list) only** `[user]`
 | FR-SCH-05 | `burst` at second 02 | Extra telegram at 02; next scheduled at 05 | Schedule shifted to 07 | target |
 | FR-SCH-06 | Force two emissions 100 ms apart | Second follows the first intact | Bytes of the two interleaved | target |
 | FR-SCH-08 | Encode the CI1 telegram; compute the gap at a 5 s period | ≥ 3000 ms silent | Any gap under 2000 ms; a size that varies with model state | host |
-| FR-SCH-08 | Run ≥ 6 consecutive cycles against the DUT | Each cycle decoded separately, same object count every time | Two cycles merged into one; a cycle byte count above one telegram's | bench |
+| FR-SCH-08 | Capture ≥ 6 consecutive cycles off the bus | Each delimited separately, same byte count every time | Two cycles merged into one | bench |
 
 ---
 
@@ -291,11 +290,11 @@ layer to the one below, so the first that fails names the fault. `[user]`
 
 | Mode | On the wire | Answers |
 |---|---|---|
-| **1 pattern** | `0x55`, no protocol | Does any signal reach the reader, at the right line settings? |
-| **2 simple** | One frame, three objects, fixed values | Can the reader decode a telegram at all? |
+| **1 pattern** | `0x55`, no protocol | Does a signal come off the bus, at the right line settings? |
+| **2 simple** | One frame, three objects, fixed values | Is a single telegram decodable at all? |
 | **3 e450** | The full 13-object list, values changing every emission | Can it decode *this meter's* telegrams? |
 
-Between 2 and 3 lie the two things most likely to defeat a reader: multi-block
+Between 2 and 3 lie the two things most likely to defeat a decoder: multi-block
 General Block Transfer reassembly, and values it has not seen before. Running
 them in order separates *the line is wrong* from *the decoder is wrong* from
 *the decoder cannot handle the real thing*. `[derived]`
@@ -310,22 +309,22 @@ them in order separates *the line is wrong* from *the decoder is wrong* from
 | **FR-MOD-04** | Must | Mode 3 shall emit the Appendix A list with a load chosen per emission by a generator seeded identically at every boot, and shall choose that load **before** integrating the period, so the energy in a telegram equals the power in that same telegram times the period. | `[user]` |
 | **FR-MOD-05** | Must | Every emission shall be logged on the console with its mode and the values it carried. | `[derived]` |
 
-> **Why mode 1 bursts rather than streams.** A reader delimits a transmission by
-> the silence that follows it, so a stream it never sees the end of is a stream it
-> never reports on — the operator learns nothing, which defeats the mode. One
-> second of pattern on the 5 s schedule gets echoed back in the reader's log,
-> which is the entire point. `[derived]`
+> **Why mode 1 bursts rather than streams.** A transmission is delimited by the
+> silence that follows it, so a stream with no end is one nothing downstream ever
+> reports on — the operator learns nothing, which defeats the mode. One second of
+> pattern on the 5 s schedule is a delimited burst, which is the entire point.
+> `[derived]`
 
 > **Why mode 2's values are fixed and mode 3's are not.** They are being used for
-> opposite purposes. Mode 2 is a *known answer*: anyone can check the reader
-> against 777 W and 12 345 Wh without consulting the simulator. Mode 3 is a
-> *challenge*: values that change every emission are what stop a reader passing
+> opposite purposes. Mode 2 is a *known answer*: 777 W and 12 345 Wh can be
+> checked against without consulting the simulator at all. Mode 3 is a
+> *challenge*: values that change every emission are what stop a decoder passing
 > by caching a constant or guessing, so it must genuinely decode each message —
 > which is why FR-MOD-05 requires the simulator to record what it sent. `[user]`
 
 > **Random, but replayable.** FR-CLK-04 requires two runs from reset to produce
 > identical bytes, and mode 3 varies its values. Both hold because the generator
-> is seeded from a constant: unpredictable to the reader, reproducible for us.
+> is seeded from a constant: unpredictable downstream, reproducible for us.
 > `[derived]`
 
 ### 13.3 Verification contracts
@@ -333,7 +332,7 @@ them in order separates *the line is wrong* from *the decoder is wrong* from
 | ID | Precondition · stimulus | Expected | **Prohibited** | Tier |
 |---|---|---|---|---|
 | FR-MOD-01 | `mode 2` mid-emission | Current emission completes intact; next is mode 2 | A truncated frame at the switch | bench |
-| FR-MOD-02 | `mode 1`, reader capturing | Every byte received is `0x55`, once per period | A continuous stream the reader never delimits | bench |
+| FR-MOD-02 | `mode 1`, capture the line | Every byte on the line is `0x55`, once per period | A continuous stream with no gap | bench |
 | FR-MOD-03 | Encode mode 2; count `7E A0` openings; decode | Exactly 1 frame; 777 W and 12 345 Wh | More than one frame; any decode failure | host |
 | FR-MOD-04 | 50 draws from the seeded generator | >25 distinct loads; import and export never both non-zero | A constant; both directions at once | host |
 | FR-MOD-04 | Two runs from reset, same seed | Identical load sequence | Any divergence | host |
@@ -384,7 +383,7 @@ puts on its wired M-Bus interface. Its peer is `dlms_parser` v2.1.0.
 | FR-ENC-05 | Encode 3 telegrams | Invoke ids 0, 1, 2 | Constant invoke id | host |
 | FR-ENC-06/07 | Encode a 320-byte APDU with a 128-byte block size | 3 blocks, last flagged `0xC0` | A block flagged final that is not the last | host |
 | FR-ENC-07 | Re-encode the same APDU with block size 64 | Decodes to identical values | Decode differs with block size | host |
-| FR-ENC-10 | Encode one telegram; recompute both CRCs independently | Both match | A frame accepted by the DUT with a wrong FCS | host |
+| FR-ENC-10 | Encode one telegram; recompute both CRCs independently | Both match | Any frame emitted with a wrong HCS or FCS | host |
 | FR-ENC-12 | `cmake -S test/host && ctest` on Linux, no ESP-IDF present | Builds and passes | Any ESP-IDF header required | host |
 
 ---
@@ -396,8 +395,7 @@ puts on its wired M-Bus interface. Its peer is `dlms_parser` v2.1.0.
 The simulator's entire public API. Its peer is a human at a terminal or
 `WorkbenchDriver.serial_write()` over the workbench's RFC2217 proxy — which is
 why it is a serial line and not a network service: it needs no provisioning, no
-broker and no IP, and it cannot interfere with the WiFi the DUT is being tested
-on. `[user]`
+broker and no IP, and it cannot interfere with any network in use around it. `[user]`
 
 ### 8.2 Requirements
 
@@ -414,9 +412,9 @@ on. `[user]`
 > **Why a requirement for a test pattern.** `0x55` alternates every bit, so it
 > separates the line settings from everything layered on top: no framing, no
 > checksums and no content have to be right for it to mean something. What the
-> reader logs back names the fault — `0x55` clean, `0xD5` one inversion out
+> comes off the line names the fault — `0x55` clean, `0xD5` one inversion out
 > (FR-LNK-02), varying bytes a wrong rate. It is the first thing to reach for
-> when a reader decodes nothing, and it is how FR-LNK-02 was settled.
+> when nothing decodes, and it is how FR-LNK-02 was settled.
 
 ### 8.3 Verification contracts
 
@@ -425,7 +423,7 @@ on. `[user]`
 | FR-CLI-03/04 | `set pi 1500` then `status` | `OK` then one line containing `pi=1500` | Multi-line or unparsable status | bench |
 | FR-CLI-05 | `set pi -5`, then `status` | `ERR`; `pi` unchanged | Negative or wrapped power accepted | bench |
 | FR-CLI-06 | Issue 100 commands while monitoring UART2 | Only telegram bytes on UART2 | Any console character on the meter link | target |
-| FR-CLI-07 | `tx 10` with a reader capturing the meter link | `OK 2180 bytes…`; every byte received is `0x55` | Any telegram byte interleaved into the pattern | bench |
+| FR-CLI-07 | `tx 10` while capturing the meter link | `OK 2180 bytes…`; every byte captured is `0x55` | Any telegram byte interleaved into the pattern | bench |
 
 ---
 
@@ -447,11 +445,11 @@ on. `[user]`
 > before the peripheral takes it over — **high** with FR-LNK-02 as written, low if
 > inversion is ever turned back on. From reset until `app_main` configures it,
 > that pin is a floating input and the bus level is undefined, so without this
-> every simulator reboot may present the DUT with a break condition or noise.
+> every simulator reboot may present the bus with a break condition or noise.
 
 > **How FR-LNK-02 was settled.** It was originally written the other way round,
 > from a description of the driver stage as inverting, and never measured. The
-> `tx` command (FR-CLI-07) then sent a continuous `0x55` and the reader logged a
+> `tx` command (FR-CLI-07) then sent a continuous `0x55` and a 2400 8E1 capture showed a
 > uniform `0xD5` across all 520 bytes received. That byte is not a symptom of a
 > wrong rate, which produces varying bytes: inverting a `0x55` 8E1 frame moves
 > the receiver's start-bit edge one bit late, so it samples `1 0 1 0 1 0 1 1` —
@@ -462,7 +460,7 @@ on. `[user]`
 
 | ID | Precondition · stimulus | Expected | **Prohibited** | Tier |
 |---|---|---|---|---|
-| FR-LNK-01/02 | `tx 10` (FR-CLI-07) with a 2400 8E1 reader on the bus | Every byte received is `0x55` | `0xD5` (one inversion out); varying bytes (wrong rate); no bytes | bench |
+| FR-LNK-01/02 | `tx 10` (FR-CLI-07), captured at 2400 8E1 | Every byte captured is `0x55` | `0xD5` (one inversion out); varying bytes (wrong rate); no bytes | bench |
 | FR-LNK-01/02 | Capture one telegram with a logic analyser at the driver input | Byte stream identical to the host test's output; 2400 8E1 decode clean | Any parity or framing error | target |
 | FR-LNK-04 | Idle simulator; DVM on the bus | 24 V | 12 V (continuous space) | target |
 | FR-LNK-05 | Scope the bus across a simulator reset, 20 resets | Bus at 24 V within 10 ms, no spurious edges | Any spurious start bit at boot | target |
@@ -482,26 +480,26 @@ on. `[user]`
 |---|---|---|---|---|
 | FR-CLK-04 | Reset; `set time 2026-08-04T17:00:00`; `set pi 1000`; capture 12 telegrams. Repeat. | Both captures byte-identical | Any differing byte | target |
 
-## 11. DUT Power — **withdrawn**
+## 11. Downstream Power — **withdrawn**
 
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
-| **FR-PWR-01** | ~~Must~~ | `deprecated` 2026-08-05 — the rig shall supply 5 V, ground and the Data Request line to the DUT connector. | `[user]` |
-| **FR-PWR-02** | ~~Must~~ | `deprecated` 2026-08-05 — `dut off` and `dut on` shall remove and restore that 5 V under firmware control. | `[user]` |
-| **FR-PWR-03** | ~~Must~~ | `deprecated` 2026-08-05 — removing DUT power shall not alter the model, the clock or the schedule. | `[derived]` |
+| **FR-PWR-01** | ~~Must~~ | `deprecated` 2026-08-05 — the rig shall supply 5 V, ground and the Data Request line on the connector. | `[user]` |
+| **FR-PWR-02** | ~~Must~~ | `deprecated` 2026-08-05 — a console command shall remove and restore that 5 V under firmware control. | `[user]` |
+| **FR-PWR-03** | ~~Must~~ | `deprecated` 2026-08-05 — removing that power shall not alter the model, the clock or the schedule. | `[derived]` |
 
 > **Why these are withdrawn, and why the IDs stay.** The premise was a separate
 > switched 5 V rail on GPIO16. There is no such rail: **the pin is not connected,
-> and the reader is powered from the M-Bus signal itself** — the 24 V mark state
+> and an M-Bus slave is powered from the signal itself** — the 24 V mark state
 > that FR-LNK-04 requires the idle line to hold is what feeds it. `[user]`
 >
-> So the simulator has no way to remove the reader's power without ceasing to be
-> a meter, and `dut on`/`dut off` were a console command driving an unconnected
-> pin and replying `OK`. The command, the two Kconfig options and the `dut=`
-> field of `status` are removed. The IDs are kept and struck through rather than
+> So the simulator has no way to remove that power without ceasing to be a
+> meter, and the commands were driving an unconnected pin and replying `OK`.
+> They, the two Kconfig options and the corresponding `status` field are
+> removed. The IDs are kept and struck through rather than
 > deleted, so that earlier results referring to them stay readable.
 >
-> Power-cycling the DUT is still a useful capability and is now **out of scope**:
+> Power-cycling whatever is on the bus is still useful and is now **out of scope**:
 > it would need a hardware enable on the driver stage, which does not exist. An
 > operator does it by hand.
 
@@ -515,11 +513,11 @@ on. `[user]`
 |---|---|---|---|
 | **host** | Linux, GitHub Actions, every push | Nothing | §5 model arithmetic, §7 encoder — decoded by `dlms_parser` v2.1.0 |
 | **target** | The ESP32 alone | Logic analyser or second ESP32 | §6 timing, §9 line, §10 determinism |
-| **bench** | Workbench + a real reader | Both boards, workbench Pi | §8 console, §9 line settings, §6 cycle timing, end-to-end |
+| **bench** | Workbench + a capture of the line | Board, interface, workbench Pi | §8 console, §9 line settings, §6 cycle timing, end-to-end |
 
-**The host oracle is the decoder the DUT actually runs.** `test/host/CMakeLists.txt`
-fetches `dlms_parser` at tag **v2.1.0** — the same tag `gplug-mini` pins — so a
-host pass means the DUT can decode it. This proves *decodable*, not *faithful*: a
+**The host oracle is a decoder we did not write.** `test/host/CMakeLists.txt`
+fetches `dlms_parser` at tag **v2.1.0**, so a host pass means the output is
+readable by an independent implementation. This proves *decodable*, not *faithful*: a
 tolerant decoder would accept output a real E450 never emits. Byte-exact
 reproduction of `e450_serial8.hex` is the stronger test held in reserve, and it
 requires supplying the capture's own irregular block split (A-03).
@@ -553,7 +551,7 @@ selection is `[doc:EBL]`.
 | 13 | `1-0:71.7.0` | 2 | 3 | `uint32`, mA | Strom L3 |
 
 **The meter serial `0-0:96.1.0` is not here** — EBL puts it in the 15 s list,
-which v1 does not emit. A DUT tested against this simulator therefore never
+which v1 does not emit. Anything tested against this simulator therefore never
 learns a meter identity, which differs from the field where it arrives every
 15 s. Known and accepted `[user]`; closing it costs 4 objects and ≈0.6 s of
 airtime.
@@ -583,5 +581,5 @@ which agree on all of them. `[capture]`
 
 ## Related
 
-`[[gplug-mini-FSD]]` · `[[MBUS-E450-Interface-Spec]]` ·
+[The operator's manual](../UserDocumentation/MBUS-Simulator-Manual.md) ·
 `docs/Standard CIP-Liste_DE.pdf` (Landis+Gyr, 16 Sep 2024)

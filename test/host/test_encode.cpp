@@ -3,12 +3,12 @@
 // Every case is registered separately in CMakeLists.txt under the requirement it
 // discharges, so a red build names the property that broke.
 //
-// The oracle in `decode` is dlms_parser v2.1.0 — the decoder gplug-mini actually
-// runs. That is the whole design: if the DUT's decoder cannot read our bytes on
-// a laptop, it will not read them on the wire either, and we find out in seconds
-// instead of on the bench. Note what this proves and what it does not: it proves
-// the output is *decodable*, not that it is *faithful*. A tolerant decoder would
-// accept telegrams a real E450 never emits.
+// The oracle in `decode` is dlms_parser v2.1.0 — a DLMS decoder we did not
+// write. That is the whole design: if an independent implementation cannot read
+// our bytes on a laptop, nothing will read them on the wire either, and we find
+// out in seconds instead of on the bench. Note what this proves and what it does
+// not: it proves the output is *decodable*, not that it is *faithful*. A tolerant
+// decoder would accept telegrams a real E450 never emits.
 
 #include <dlms_parser/dlms_parser.h>
 #include <e450/ebl_ci1.h>
@@ -62,7 +62,7 @@ std::vector<uint8_t> encode(const e450::ValueModel &model, uint32_t invoke_id = 
     return e450::encode_telegram(make_spec(values, invoke_id, e450::DateTime{}), wire);
 }
 
-// Run the bytes through the DUT's decoder and collect every numeric capture,
+// Run the bytes through the independent decoder and collect every numeric capture,
 // keyed by OBIS code in dlms_parser's "a.b.c.d.e.f" spelling.
 std::map<std::string, double> decode(std::vector<uint8_t> bytes, std::size_t *count = nullptr) {
     std::map<std::string, double> values;
@@ -98,7 +98,7 @@ double at(const std::map<std::string, double> &values, const char *obis) {
 
 // ---------------------------------------------------------------- cases
 
-// FR-ENC-01..04: the DUT's decoder reads our telegram and recovers the model.
+// FR-ENC-01..04: an independent decoder reads our telegram and recovers the model.
 void case_decode() {
     e450::ValueModel model;
     model.set_import_w(1500);
@@ -116,7 +116,7 @@ void case_decode() {
     check_eq(at(values, OBIS_I_L3), 2173, "current L3");
 }
 
-// FR-ENC-05: the invoke id counts telegrams. A DUT that dedupes on it would
+// FR-ENC-05: the invoke id counts telegrams. Anything that dedupes on it would
 // otherwise treat every burst as a repeat of the first.
 void case_invoke_id() {
     const e450::ValueModel model;
@@ -304,15 +304,15 @@ void case_determinism() {
     check(first == second, "same state, same bytes");
 }
 
-// FR-SCH-08 — the telegram must leave the reader a silent gap long enough to
-// call the transmission finished.
+// FR-SCH-08 — the telegram must leave a silent gap long enough for the
+// transmission to be called finished.
 //
 // This is a host test because the arithmetic is fully determined here: the CI1
 // list is fixed and every value is a fixed-width encoding, so the telegram is
 // the same size whatever the model holds. If it ever stops fitting — a longer
 // object list, a second push setup, a wider value — the failure is a merged
-// burst at the far end, which presents as a decode fault in the *reader* and
-// gets debugged there. Catching it in ctest costs seconds instead.
+// burst at the far end, which presents as a decode fault downstream and gets
+// debugged in the wrong place. Catching it in ctest costs seconds instead.
 void case_silence() {
     e450::ValueModel model;
     e450::DateTime when;
@@ -338,7 +338,7 @@ void case_silence() {
                 wire.size(), e450::wire_time_ms(wire.size()), silence, period_ms);
 
     check(silence >= e450::MIN_SILENCE_MS, "5 s period leaves the 3 s target gap");
-    check(silence >= e450::DUT_BURST_TIMEOUT_MS, "5 s period clears the reader's 2 s timeout");
+    check(silence >= e450::BURST_TIMEOUT_MS, "5 s period clears the 2 s burst timeout");
 
     // The rounding must be conservative, or a telegram that just misses passes.
     check(e450::wire_time_ms(1) == 5, "one byte is 11 bits = 4.58 ms, rounded up");
@@ -349,7 +349,7 @@ void case_silence() {
 //
 // The frame count is the property that makes this mode worth having. Mode 3
 // spans three frames and needs multi-block GBT reassembly; if mode 2 decodes and
-// mode 3 does not, the reader's reassembly is the fault and nothing else is.
+// mode 3 does not, multi-frame reassembly is the fault and nothing else is.
 // That inference only holds while mode 2 really is a single frame, so it is
 // asserted rather than assumed.
 void case_mode_simple() {
@@ -391,7 +391,7 @@ void case_mode_random() {
               "same seed, same sequence");
     }
 
-    // Varies: a mode whose whole purpose is to stop a reader passing on a
+    // Varies: a mode whose whole purpose is to stop a decoder passing on a
     // constant must not itself emit a constant.
     e450::Rng rng{e450::MODE3_SEED};
     e450::ValueModel model;
@@ -405,7 +405,7 @@ void case_mode_random() {
 
     // Consistent: the load is chosen before the period is integrated, so the
     // energy a telegram reports is exactly the power it reports times the
-    // period. This is the arithmetic a reader can be checked against.
+    // period. This is the arithmetic a decode can be checked against.
     e450::Rng rng2{e450::MODE3_SEED};
     e450::ValueModel m2;
     uint32_t expected_mwh_s = 0;
@@ -417,7 +417,7 @@ void case_mode_random() {
     check_eq(m2.import_wh(), expected_mwh_s / 3'600'000u, "energy is the integral of the load");
 
     // Import and export never both flow: a real meter measures one direction at
-    // a time, and a reader is entitled to assume it.
+    // a time, and a decoder is entitled to assume it.
     e450::Rng rng3{e450::MODE3_SEED};
     e450::ValueModel m3;
     for (int i = 0; i < 100; ++i) {

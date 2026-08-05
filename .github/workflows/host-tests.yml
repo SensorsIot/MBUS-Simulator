@@ -5,8 +5,8 @@
 # an encoder regression is not buried under a firmware build, and this job can
 # gate a pull request without waiting for one.
 #
-# The oracle is dlms_parser v2.1.0 — the exact tag gplug-mini pins — fetched by
-# test/host/CMakeLists.txt. A pass here means the decoder the DUT actually runs
+# The oracle is dlms_parser v2.1.0, an independent DLMS decoder, fetched by
+# test/host/CMakeLists.txt. A pass here means an implementation we did not write
 # can read what the encoder produces, proven on a laptop with no hardware.
 name: Host tests
 

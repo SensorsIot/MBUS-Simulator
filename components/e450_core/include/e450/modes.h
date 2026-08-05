@@ -15,11 +15,11 @@ namespace e450 {
 // They are a diagnostic ladder, not a feature list. Each mode adds exactly one
 // layer to the one below it, so the first one that fails names the fault:
 //
-//   Pattern  bytes, no protocol         does any signal reach the reader?
-//   Simple   one frame, real values     can the reader decode a telegram?
+//   Pattern  bytes, no protocol         does any signal come off the line?
+//   Simple   one frame, real values     is a single telegram decodable?
 //   E450     the full list, varying     can it decode *this meter's* telegrams?
 //
-// Between Simple and E450 lie the two things most likely to break a reader:
+// Between Simple and E450 lie the two things most likely to break a decoder:
 // multi-block General Block Transfer reassembly, and values it has not seen
 // before. Running them in order separates "the line is wrong" from "the decoder
 // is wrong" from "the decoder cannot handle the real thing".
@@ -30,16 +30,16 @@ enum class Mode : uint8_t {
 };
 
 // Mode 1 — FR-MOD-02. A burst of 0x55 on the same cadence as a telegram, not a
-// continuous stream: the reader delimits a transmission by the silence after
-// it, so a stream it never sees the end of is one it never reports on. A burst
-// gets echoed back in its logs, which is the entire point of the mode.
+// continuous stream: a transmission is delimited by the silence after it, so a
+// stream with no end is one nothing downstream ever reports on. A delimited
+// burst is the entire point of the mode.
 inline constexpr uint8_t PATTERN_BYTE = 0x55;
 inline constexpr std::size_t PATTERN_BURST_BYTES = 218;  // one second at 2400 8E1
 
 // Mode 2 — FR-MOD-03. The smallest thing that is still a real telegram: a push
 // setup and two registers, fixed values, one GBT block, one HDLC frame. Fixed
-// because the point is a known answer — anyone can check the reader against
-// these two numbers without reading a log from the simulator.
+// because the point is a known answer — these two numbers can be checked
+// against without reading a log from the simulator at all.
 namespace simple {
 
 inline constexpr std::size_t OBJECT_COUNT = 3;
@@ -55,8 +55,8 @@ std::vector<TelegramValue> values();
 //
 // Called *before* the tick that integrates the period, so the energy reported
 // in a telegram is exactly the power reported in that same telegram multiplied
-// by the period. A reader can check the arithmetic against itself, with no
-// reference to what came before.
+// by the period. The arithmetic checks against itself, with no reference to
+// what came before.
 void apply_random_load(ValueModel &model, Rng &rng);
 
 }  // namespace e450

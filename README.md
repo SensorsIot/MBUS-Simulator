@@ -2,14 +2,14 @@
 
 **ESP32** firmware that behaves, on the wire, like the customer information
 interface of a Landis+Gyr **E450** smart meter as parametrised by **EBL Liestal**
-— so that a meter reader such as [`gplug-mini`](https://github.com/SensorsIot/gplug-mini)
-can be developed and regression-tested without a physical meter.
+— so that software which consumes that interface can be developed and
+regression-tested without a physical meter.
 
 It is a generator, not a tape player. Three modes form a diagnostic ladder — a
 bare `0x55` pattern, one small telegram with fixed values, and the full 13-object
-E450 list whose load changes on every emission so a reader has to decode each
+E450 list whose load changes on every emission, so a decoder has to read each
 message rather than cache one. Energy integrates the transmitted power
-throughout, so the arithmetic a reader reports can be checked, not just its
+throughout, so the arithmetic a decode produces can be checked, not just its
 parsing.
 
 ```
@@ -21,7 +21,7 @@ console CLI ──► mode 1|2|3 ──► push scheduler ──► telegram enc
                                               12/24 V M-Bus driver ◄─────────┘
                                                       │     (non-inverting)
                                                       ▼
-                                       device under test, powered from the bus
+                                       receiver, powered from the bus
 ```
 
 ## Hardware
@@ -31,15 +31,16 @@ console CLI ──► mode 1|2|3 ──► push scheduler ──► telegram enc
 | Board | ESP32 classic (Xtensa) — **not** an ESP32-C3 |
 | Meter link | UART2, TX on **GPIO17**, 2400 8E1, **TX not inverted** |
 | Driver stage | External, non-inverting, logic level → 12/24 V M-Bus |
-| DUT supply | The M-Bus signal itself — the reader draws its power from the line, so the 24 V mark state is its supply |
+| Downstream supply | The M-Bus signal itself — an M-Bus slave draws its power from the line, so the 24 V mark state is its supply |
 
 Pins are Kconfig, not literals — GPIO16/17 are free on WROOM but belong to the
 SPI PSRAM on WROVER, where they silently do nothing.
 
-The reader has no supply of its own: it draws power from the M-Bus line, so the
+An M-Bus slave has no supply of its own: it draws power from the line, so the
 24 V mark state the line rests in between telegrams is its supply as well as its
 idle level. A rig that leaves the line at 12 V, or floating from reset until the
-firmware configures the pin, starves the reader as well as misframing it.
+firmware configures the pin, starves whatever is connected as well as misframing
+it.
 
 ## Layout
 
@@ -47,7 +48,7 @@ firmware configures the pin, starves the reader as well as misframing it.
 components/e450_core/   Portable C++: A-XDR, DataNotification, GBT, HDLC, value model.
                         No ESP-IDF, no FreeRTOS — this is what makes the host tier possible.
 main/                   ESP32 shell: UART, console, scheduler, clock.  (Phase 2)
-test/host/              Host tests: decode our own output with the DUT's decoder.
+test/host/              Host tests: decode our own output with an independent decoder.
 docs/Functionality/     The FSD — what it must do and how that is demonstrated.
 docs/UserDocumentation/ The operator's manual — how to install, run and diagnose it.
 ```
@@ -62,10 +63,10 @@ cmake --build build/host
 ctest --test-dir build/host --output-on-failure
 ```
 
-The oracle is **`dlms_parser` v2.1.0** — the exact tag `gplug-mini` pins — so a
-pass means the decoder the device under test actually runs can read what we
-emit. `test/host/decode_dump` is a development tool that prints what the decoder
-makes of any hex dump, generated or captured from a real meter.
+The oracle is **`dlms_parser` v2.1.0**, a DLMS decoder we did not write, so a
+pass means an independent implementation can read what we emit.
+`test/host/decode_dump` is a development tool that prints what the decoder makes
+of any hex dump, generated or captured from a real meter.
 
 ## Building the firmware
 

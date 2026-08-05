@@ -6,12 +6,12 @@ namespace e450 {
 
 // A deterministic pseudo-random generator — FR-MOD-04.
 //
-// "Random" here means *unpredictable to the reader*, not unpredictable to us.
-// Mode 3 varies its values so that a reader cannot pass by caching a constant
+// "Random" here means *unpredictable downstream*, not unpredictable to us.
+// Mode 3 varies its values so that a decoder cannot pass by caching a constant
 // or guessing; it must decode every message. But FR-CLK-04 still requires two
 // runs from reset to produce identical bytes, so the sequence has to be
-// reproducible. A seeded generator is both: the reader cannot anticipate it,
-// and we can replay it exactly.
+// reproducible. A seeded generator is both: it cannot be anticipated from the
+// bus, and we can replay it exactly.
 //
 // xorshift32. Not cryptographic, and it does not need to be — nothing here is
 // a secret, and the property being bought is repeatability.

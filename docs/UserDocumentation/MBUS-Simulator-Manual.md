@@ -1,6 +1,6 @@
 # MBUS-Simulator — User Manual
 
-A fake electricity meter for testing meter readers.
+A fake electricity meter, for testing anything that reads one.
 
 Technical detail is deliberately not repeated here — where you need it, this
 manual points at the [FSD](../Functionality/MBUS-Simulator-FSD.md).
@@ -12,20 +12,20 @@ manual points at the [FSD](../Functionality/MBUS-Simulator-FSD.md).
 It pretends to be the customer interface of a Landis+Gyr E450 smart meter, the
 kind installed by EBL Liestal. Every five seconds it sends out a reading —
 power, energy, reactive energy and current — exactly as the real meter would, so
-you can develop and test a meter reader without having a meter.
+you can build and test meter-reading software without having a meter.
 
-**It has three modes, and they are a ladder.** Each one is harder for a reader
+**It has three modes, and they are a ladder.** Each one is harder for a receiver
 than the one below, so the first that fails tells you where the problem is:
 
 | Mode | What it sends | What it tells you |
 |---|---|---|
 | **1** | A plain test pattern | Whether any signal is arriving at all |
-| **2** | One small reading, always the same numbers | Whether the reader can decode anything |
+| **2** | One small reading, always the same numbers | Whether the receiver can decode anything |
 | **3** | The real thing, values changing every time | Whether it can decode a real meter |
 
 Mode 3 is the default and the one you will normally use. Its values change on
-every reading, deliberately: a reader cannot pass by remembering a number, it
-has to decode each message. Energy still follows power exactly, so if the reader
+every reading, deliberately: a receiver cannot pass by remembering a number, it
+has to decode each message. Energy still follows power exactly, so if the receiver
 gets the arithmetic wrong, you find out.
 
 You control it by typing commands on a serial console. There is no app, no web
@@ -39,9 +39,9 @@ metrological standing. See chapter 6 for the limits that matter in practice.
 ## 2. How it is connected
 
 ```
-   ESP32                interface board              your reader
+   ESP32                interface board             your device
   ┌──────┐   GPIO17    ┌──────────────┐  12/24 V   ┌──────────┐
-  │  sim │ ──────────► │  M-Bus driver│ ─────────► │  reader  │
+  │  sim │ ──────────► │  M-Bus driver│ ─────────► │ receiver │
   └──────┘             └──────────────┘            └──────────┘
       │
       │ USB — console, and how you flash it
@@ -57,7 +57,7 @@ Three connections and that is all:
 | **Ground** | Common between the boards |
 | **USB** | Console and firmware, to your PC or a workbench slot |
 
-**The reader is powered by the meter signal itself** — it has no supply of its
+**The receiver is powered by the meter signal itself** — it has no supply of its
 own, and there is no separate power wire to connect. That also means you cannot
 switch it off from the console; unplug it by hand.
 
@@ -145,9 +145,9 @@ Every five seconds it logs what it sent:
 I sim: e450 7: 381 bytes on GPIO17, 1747 ms on the wire, 3253 ms silent - pi=4820 po=0 ei=27 eo=0 i=6985
 ```
 
-**Compare that line against what your reader reports.** They should agree — same
+**Compare that line against what your receiver reports.** They should agree — same
 power, same energy. That is the whole test, and because mode 3's values change
-every time, agreement means the reader really decoded the message.
+every time, agreement means the receiver really decoded the message.
 
 If they do not agree, drop down the ladder:
 
@@ -157,7 +157,7 @@ OK 2 simple
 ```
 
 Mode 2 sends the same two numbers every time — **777 W** and **12345 Wh**. If the
-reader shows those, it can decode; the problem is with the full E450 telegram.
+receiver shows those, it can decode; the problem is with the full E450 telegram.
 If it shows nothing, go to `mode 1` and chapter 5.2.
 
 ### 4.3 Commands
@@ -166,7 +166,7 @@ If it shows nothing, go to `mode 1` and chapter 5.2.
 |---|---|
 | `mode` | Say which mode is running |
 | `mode 1` | Test pattern — is a signal arriving? |
-| `mode 2` | Small fixed reading — can the reader decode? |
+| `mode 2` | Small fixed reading — can the receiver decode? |
 | `mode 3` | Full E450, changing values — can it decode the real thing? |
 | `status` | Show everything, on one line |
 | `set time <YYYY-MM-DDTHH:MM:SS>` | Move the clock |
@@ -176,7 +176,7 @@ Every command answers `OK` or `ERR …` on a single line. A mode change takes
 effect at the next reading, so a message already going out is never cut short.
 
 There is no command to set the power: each mode decides its own values. That is
-what makes a test result mean something — you compare the reader against the
+what makes a test result mean something — you compare the receiver against the
 simulator's own log, not against a number you typed.
 
 ### 4.4 Reading `status`
@@ -227,7 +227,7 @@ I (32082) sim: e450 6: 381 bytes on GPIO17, 1747 ms on the wire, 3253 ms silent 
 ```
 
 - **It appears** → the simulator is fine; the problem is the wiring, the
-  interface board, or the reader. Go to 5.2.
+  interface board, or the receiver. Go to 5.2.
 - **It does not** → re-check the banner (3.3). A board running different
   firmware looks exactly like a broken one.
 
@@ -243,33 +243,33 @@ sim> mode 1
 OK 1 pattern
 ```
 
-Now look at what your reader received, then `mode 3` to put it back:
+Now look at what your receiver received, then `mode 3` to put it back:
 
 | It received | What is wrong |
 |---|---|
 | `55 55 55 …` | Nothing — the signal is correct. The fault is further along. |
 | `D5 D5 D5 …` or `AA AA AA …` | The signal is inverted. Change `SIM_TX_INVERT` (chapter 7). |
-| Bytes that vary, but always the same way | Wrong speed or parity setting at the reader. |
-| Nothing at all | Wiring, or the interface board. The reader takes its power from this signal, so no signal also means no reader. |
+| Bytes that vary, but always the same way | Wrong speed or parity setting at the receiving end. |
+| Nothing at all | Wiring, or the interface board. The receiver takes its power from this signal, so no signal also means no receiver. |
 
 `D5` looks like nonsense but is not: consistent nonsense means an inverted
 signal, not interference. The reasoning is in FSD FR-LNK-02.
 
-### 5.3 The reader gets data but cannot read it
+### 5.3 Data arrives but will not decode
 
 Try `mode 2` first — if its two fixed numbers come through and mode 3's do not,
-the reader cannot reassemble a telegram split across several frames, and that is
+the receiver cannot reassemble a telegram split across several frames, and that is
 the fault. If neither works, check the **`ms silent`** figure on the console line
-above. Readers decide a
+above. Receivers decide a
 transmission has finished when the line goes quiet for about two seconds, so
 that number needs to stay comfortably above 2000. If you have shortened the
 period it may not be. The simulator prints an error line of its own when this
 happens — see FSD FR-SCH-08.
 
-A reader complaining about oversized data, or reporting far more bytes than the
+A receiver complaining about oversized data, or reporting far more bytes than the
 simulator sent, means readings were run together — same cause.
 
-### 5.4 The reader seems dead
+### 5.4 Nothing at the other end responds
 
 It is powered by the meter signal, so "no power" and "no signal" are the same
 fault. Confirm the interface board is producing 24 V on the line while the
@@ -298,13 +298,13 @@ reason.
 Worth knowing before you trust a test result:
 
 - **No meter serial number.** The real meter sends it in a different, slower
-  list that this simulator does not produce. A reader waiting to learn the
+  list that this simulator does not produce. A receiver waiting to learn the
   meter's identity will wait forever here.
 - **Nothing is encrypted.** Real installations often are.
 - **One kind of reading only** — the five-second list. No 15-second, minute or
   quarter-hour lists.
-- **Passing here is necessary, not sufficient.** It proves a reader *can* read
-  this output. A forgiving reader would also accept things a real meter never
+- **Passing here is necessary, not sufficient.** It proves a receiver *can* read
+  this output. A forgiving receiver would also accept things a real meter never
   sends.
 
 Full scope and the reasoning behind each: FSD §1.5 and Appendix A.

@@ -61,7 +61,7 @@ struct TelegramSpec {
 // e450_serial16.hex, which agree on all of them (FSD Appendix B). They are
 // parameters rather than literals so a test can vary the block size — the split
 // policy is ours to choose (FSD A-03), and a different split is itself a useful
-// case for the DUT's reassembler.
+// case for whatever reassembles them.
 // Meter-link line timing (FR-LNK-01). One character is start + 8 data + even
 // parity + stop, so 2400 baud carries 218.18 byte/s and nothing faster.
 inline constexpr int LINK_BAUD = 2400;
@@ -76,19 +76,20 @@ constexpr uint32_t wire_time_ms(std::size_t bytes) {
 }
 
 // Silence left in a push period once a telegram of `bytes` has been sent —
-// negative if it does not fit. The DUT delimits transmissions by a gap rather
-// than by frame count (FR-SCH-08), so this is the quantity that decides whether
-// consecutive telegrams are read as two or misread as one.
+// negative if it does not fit. An M-Bus transmission is delimited by the gap
+// that follows it rather than by frame count (FR-SCH-08), so this is the
+// quantity that decides whether consecutive telegrams are read as two or
+// misread as one.
 constexpr int32_t silence_ms(std::size_t bytes, uint32_t period_ms) {
     return static_cast<int32_t>(period_ms) - static_cast<int32_t>(wire_time_ms(bytes));
 }
 
-// The gap a reader needs to call a transmission finished, and the margin this
-// simulator holds itself to. 2000 ms is the DUT's own threshold; the simulator
-// targets 3000 ms so that a reader running slightly long, or a telegram that
-// grows a little, does not silently merge two cycles into one.
+// The gap needed to call a transmission finished, and the margin this simulator
+// holds itself to. 2000 ms is the conventional threshold; the simulator targets
+// 3000 ms so that a receiver running slightly long, or a telegram that grows a
+// little, does not silently merge two cycles into one.
 inline constexpr int32_t MIN_SILENCE_MS = 3000;
-inline constexpr int32_t DUT_BURST_TIMEOUT_MS = 2000;
+inline constexpr int32_t BURST_TIMEOUT_MS = 2000;
 
 struct WireConfig {
     std::array<uint8_t, 2> destination{0xCE, 0xFF};

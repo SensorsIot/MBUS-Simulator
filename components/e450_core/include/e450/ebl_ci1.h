@@ -13,7 +13,7 @@ namespace e450::ebl {
 //
 // This is the *only* list v1 emits. The 15 s list (which carries the meter
 // serial 0-0:96.1.0), the 1 min tariff list and the 15 min M-Bus channel list
-// are out of scope — FSD §4.3. A DUT tested against this therefore never learns
+// are out of scope — FSD §4.3. Anything tested against this therefore never learns
 // a meter identity, which is a known and accepted difference from the field.
 inline constexpr std::size_t CI1_OBJECT_COUNT = 13;
 
