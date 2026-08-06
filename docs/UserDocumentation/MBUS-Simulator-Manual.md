@@ -170,6 +170,7 @@ If it shows nothing, go to `mode 1` and chapter 5.2.
 | `mode 2` | Small fixed reading — can the receiver decode? |
 | `mode 3` | Full E450, changing values — can it decode the real thing? |
 | `mode 4` | Counted ramp — how many bytes are being lost? |
+| `invert [on\|off]` | Invert the output signal; no argument reports it |
 | `status` | Show everything, on one line |
 | `set time <YYYY-MM-DDTHH:MM:SS>` | Move the clock |
 | `help` | List the commands |
@@ -250,12 +251,23 @@ Now look at what your receiver received, then `mode 3` to put it back:
 | It received | What is wrong |
 |---|---|
 | `55 55 55 …` | Nothing — the signal is correct. The fault is further along. |
-| `D5 D5 D5 …` or `AA AA AA …` | The signal is inverted. Change `SIM_TX_INVERT` (chapter 7). |
+| `D5 D5 D5 …` or `AA AA AA …` | The signal is inverted. Type `invert on` and look again. |
 | Bytes that vary, but always the same way | Wrong speed or parity setting at the receiving end. |
 | Nothing at all | Wiring, or the interface board. The receiver takes its power from this signal, so no signal also means no receiver. |
 
 `D5` looks like nonsense but is not: consistent nonsense means an inverted
 signal, not interference. The reasoning is in FSD FR-LNK-02.
+
+Fixing it takes one command — no rebuild:
+
+```
+sim> invert on
+OK invert=1 (idle level flipped; one edge on the line)
+```
+
+Re-run `mode 1` and the bytes should now read `55`. The setting lasts until the
+board is reset; if it turns out to be the right one for your wiring
+permanently, set `SIM_TX_INVERT` (chapter 7) so it comes up that way.
 
 ### 5.3 Data arrives but will not decode
 
@@ -400,7 +412,7 @@ guess:
 
 ```
 I sim: emit n=42 mode=e450 fault=fcs:2 bytes=381 frames=3 pre=0/0x7E wire_ms=1747
-       tx_ms=1748 lead_us=n/a silent_ms=3253 gpio=17 pi=777 ei=777 fixed=1
+       tx_ms=1748 lead_us=n/a silent_ms=3253 gpio=17 inv=0 pi=777 ei=777 fixed=1
 ```
 
 `wire_ms` is calculated from the byte count; `tx_ms` is what actually took
@@ -452,7 +464,7 @@ that something went wrong somewhere.
 
 ```
 OK pi=777 … mode=3/e450 period=5 gap=0 silence=0 serial=8 identity=none
-   preamble=0/0x7E scaler=0 energy=auto fault=none emissions=42
+   invert=0 preamble=0/0x7E scaler=0 energy=auto fault=none emissions=42
 ```
 
 ---
@@ -466,7 +478,7 @@ console command (chapter 6).
 | Setting | Default | Change it when |
 |---|---|---|
 | `SIM_MBUS_TX_GPIO` | 17 | The interface board is on another pin |
-| `SIM_TX_INVERT` | off | 5.2 says the signal is inverted |
+| `SIM_TX_INVERT` | off | Your wiring *permanently* needs the other polarity. For a one-off test use `invert` instead — no rebuild |
 | `SIM_PUSH_PERIOD_SECONDS` | 5 | You need longer gaps between readings |
 | `SIM_EPOCH` | 2026-01-01 | You want a different starting date |
 | `SIM_LINE_SENSE_GPIO` | −1 (off) | You want `lead_us` measured automatically instead of with a scope — see 6.5 |

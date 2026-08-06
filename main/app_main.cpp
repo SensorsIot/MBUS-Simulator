@@ -90,6 +90,16 @@ e450::EmissionConfig g_cfg;
 e450::FaultSpec g_fault;
 int64_t g_silence_until_us = 0;
 
+// FR-LNK-06. Line polarity, runtime. Seeded from SIM_TX_INVERT so the boot
+// behaviour is unchanged, then owned by the console: finding a polarity fault
+// used to mean a rebuild and a reflash, which puts the firmware image inside
+// the experiment it is supposed to be measuring.
+//
+// Session-only, deliberately. Persisting it would make the device's behaviour
+// depend on state nobody can see from the outside, and "what polarity is this
+// board on?" would stop being answerable from the boot log.
+bool g_inverted = TX_INVERTED;
+
 // Written from an ISR, read from the scheduler task. volatile is enough: a
 // 64-bit read is not atomic on Xtensa, but the ISR only writes while armed and
 // the reader only looks after disarming, so they never overlap.
@@ -136,6 +146,12 @@ void configure_line_sense() {
     }
 }
 
+// 0 rather than a named constant: `uart_set_line_inverse` documents its mask as
+// an OR of uart_signal_inv_t, and zero is "invert nothing" in every IDF version.
+void apply_line_polarity(bool inverted) {
+    ESP_ERROR_CHECK(uart_set_line_inverse(METER_UART, inverted ? UART_SIGNAL_TXD_INV : 0));
+}
+
 void configure_meter_link() {
     // FR-LNK-05, and the one that bites if skipped. The idle level that puts
     // 24 V — the mark state — on the bus is HIGH for this rig's non-inverting
@@ -169,9 +185,7 @@ void configure_meter_link() {
     ESP_ERROR_CHECK(uart_param_config(METER_UART, &cfg));
     ESP_ERROR_CHECK(uart_set_pin(METER_UART, TX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
                                  UART_PIN_NO_CHANGE));
-    if (TX_INVERTED) {
-        ESP_ERROR_CHECK(uart_set_line_inverse(METER_UART, UART_SIGNAL_TXD_INV));
-    }
+    apply_line_polarity(TX_INVERTED);
 }
 
 // ----------------------------------------------------------------- scheduler
@@ -195,6 +209,7 @@ struct Payload {
     std::vector<uint8_t> wire;
     uint32_t id = 0;
     std::size_t frames = 0;
+    bool inverted = false;
     char fault[40] = "none";
     char note[96] = {};
 };
@@ -202,6 +217,10 @@ struct Payload {
 Payload build_payload(e450::Mode mode, const e450::EmissionConfig &cfg,
                       const e450::FaultSpec &fault) {
     Payload out;
+    {
+        Lock held;
+        out.inverted = g_inverted;
+    }
     e450::fault_to_string(fault, out.fault, sizeof(out.fault));
 
     // FR-FLT-07. Noise replaces the telegram outright — there is nothing to
@@ -343,7 +362,7 @@ void emit(e450::Mode mode, const e450::EmissionConfig &cfg, const e450::FaultSpe
              cfg.preamble_bytes, unsigned(cfg.preamble_byte),
              e450::wire_time_ms(payload.wire.size()),
              static_cast<long long>((tx_end_us - tx_begin_us) / 1000), lead, silence,
-             CONFIG_SIM_MBUS_TX_GPIO, payload.note);
+             CONFIG_SIM_MBUS_TX_GPIO, payload.inverted ? 1 : 0, payload.note);
 
     // FR-SCH-08. Loud, and only once: a periodic error line would bury the log
     // it is trying to qualify, but a silent one lets the rig go on producing
@@ -522,7 +541,7 @@ int cmd_status(int, char **) {
         "OK pi=%" PRIu32 " po=%" PRIu32 " pf=%.2f%s ei=%" PRIu32 " eo=%" PRIu32 " q1=%" PRIu32
         " q2=%" PRIu32 " q3=%" PRIu32 " q4=%" PRIu32 " i=%" PRIu32
         " time=%04u-%02u-%02uT%02u:%02u:%02u mode=%d/%s period=%d gap=%" PRIu32
-        " silence=%d preamble=%" PRIu32 "/0x%02X serial=%u identity=%s scaler=%d energy=%s fault=%s"
+        " invert=%d silence=%d preamble=%" PRIu32 "/0x%02X serial=%u identity=%s scaler=%d energy=%s fault=%s"
         " emissions=%" PRIu32 "\n",
         g_model.import_w(), g_model.export_w(), static_cast<double>(g_model.power_factor()),
         g_model.lagging() ? "" : "L", g_model.import_wh(), g_model.export_wh(),
@@ -531,7 +550,8 @@ int cmd_status(int, char **) {
         g_model.reactive_varh(e450::ValueModel::Q3_EXPORT_LEADING),
         g_model.reactive_varh(e450::ValueModel::Q4_IMPORT_LEADING), g_model.current_ma(), now.year,
         now.month, now.day, now.hour, now.minute, now.second, static_cast<int>(g_mode),
-        mode_name(g_mode), PUSH_PERIOD_SECONDS, g_cfg.gap_ms, silence_left,
+        mode_name(g_mode), PUSH_PERIOD_SECONDS, g_cfg.gap_ms, g_inverted ? 1 : 0,
+        silence_left,
         g_cfg.preamble_bytes, unsigned(g_cfg.preamble_byte), g_cfg.serial_chars,
         identity_name(g_cfg.identity), g_cfg.scaler, energy_text, fault_text, g_emissions);
     return 0;
@@ -613,6 +633,41 @@ int cmd_fault(int argc, char **argv) {
     }
     std::printf("OK %s armed for the next telegram\n",
                 e450::fault_to_string(f, text, sizeof(text)));
+    return 0;
+}
+
+// FR-LNK-06.
+int cmd_invert(int argc, char **argv) {
+    if (argc < 2) {
+        Lock held;
+        std::printf("OK invert=%d\n", g_inverted ? 1 : 0);
+        return 0;
+    }
+    bool want = false;
+    if (std::strcmp(argv[1], "on") == 0) {
+        want = true;
+    } else if (std::strcmp(argv[1], "off") == 0) {
+        want = false;
+    } else {
+        std::printf("ERR usage: invert [on|off]\n");
+        return 1;
+    }
+
+    // Behind the TX lock: flipping the peripheral mid-telegram would invert the
+    // tail of a frame and nothing else, producing a corruption no fault
+    // directive describes and no test could interpret.
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    apply_line_polarity(want);
+    xSemaphoreGive(g_tx_lock);
+    {
+        Lock held;
+        g_inverted = want;
+    }
+
+    // The idle level flips with the polarity, so the line makes one transition
+    // now. Anything listening sees a single edge; it is not a telegram and not
+    // a fault, and saying so here saves someone chasing it.
+    std::printf("OK invert=%d (idle level flipped; one edge on the line)\n", want ? 1 : 0);
     return 0;
 }
 
@@ -745,6 +800,7 @@ void register_commands() {
          "fault [none|fcs N|truncate N|drop-block N|start-mid-frame|"
          "duplicate-register OBIS|noise N] - one telegram, then clears",
          &cmd_fault},
+        {"invert", "invert [on|off] - invert the output signal for this session", &cmd_invert},
         {"preamble", "preamble <n> [byte] - n bytes of lead-in before the first frame",
          &cmd_preamble},
         {"gap", "gap <ms> - silence between telegrams; 0 restores the schedule", &cmd_gap},
@@ -797,7 +853,7 @@ extern "C" void app_main() {
 
     ESP_LOGI(TAG, "E450 simulator: mode %d (%s), every %d s, 2400 8E1%s",
              static_cast<int>(g_mode), mode_name(g_mode), PUSH_PERIOD_SECONDS,
-             TX_INVERTED ? " inverted" : "");
+             g_inverted ? " inverted" : "");
     ESP_LOGI(TAG, "modes: 1 pattern (is there a signal?), 2 simple (can it decode?), "
                   "3 e450 (can it decode the real thing?), 4 ramp (how many bytes were lost?)");
 

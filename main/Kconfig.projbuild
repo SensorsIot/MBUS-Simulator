@@ -15,12 +15,16 @@ config SIM_TX_INVERT
     bool "Invert the meter-link TX signal"
     default n
     help
-        Off, because the simulator's output signal is not inverted: UART idle
-        drives the pin high, which the driver stage passes through as the 24 V
-        M-Bus mark state. This was measured, not assumed — with inversion on,
-        a continuous 0x55 came off the line as a uniform 0xD5, the exact
-        byte a one-inversion mismatch produces (see FR-LNK-02). Turn it back on
-        only for a driver stage that inverts. FSD FR-LNK-02.
+        The polarity at **boot**. Off, because this rig's output signal is not
+        inverted: UART idle drives the pin high, which the driver stage passes
+        through as the 24 V M-Bus mark state. Measured, not assumed — with
+        inversion on, a continuous 0x55 came off the line as a uniform 0xD5,
+        the exact byte a one-inversion mismatch produces.
+
+        You do not need to change this to test the other polarity: the console
+        command `invert on|off` flips it at runtime for the session
+        (FR-LNK-06). Change it here only when the *rig* is permanently wired to
+        an inverting driver stage. FSD FR-LNK-02/06.
 
 config SIM_LINE_SENSE_GPIO
     int "Line-sense feedback GPIO (-1 for none)"

@@ -591,7 +591,8 @@ broker and no IP, and it cannot interfere with any network in use around it. `[u
 | ID | Pri | Requirement | Provenance |
 |---|---|---|---|
 | **FR-LNK-01** | Must | The device shall transmit on UART2, TX on a configurable GPIO defaulting to **17**, at 2400 baud, 8 data bits, even parity, 1 stop bit. | `[doc:LG]` §3.1 |
-| **FR-LNK-02** | Must | The TX signal shall **not** be inverted in the UART peripheral: the signal the simulator puts on the bus is not inverted. | `[user]`, `[measured]` |
+| **FR-LNK-02** | Must | The TX signal shall **not** be inverted at boot: the signal this rig puts on the bus is not inverted. | `[user]`, `[measured]` |
+| **FR-LNK-06** | Must | `invert [on\|off]` shall change the line polarity for the remainder of the session, take effect between telegrams and never mid-telegram, and be reported on every emission and by `status`. | `[user]` |
 | **FR-LNK-03** | Must | The device shall never enable a receiver on UART2. | `[derived]` |
 | **FR-LNK-04** | Must | Between telegrams the line shall rest in the mark state, presenting 24 V on the bus. | `[derived]` |
 | **FR-LNK-05** | Must | The TX GPIO shall be driven to the mark-producing level before UART initialisation and within 10 ms of reset. | `[derived]` |
@@ -601,6 +602,20 @@ broker and no IP, and it cannot interfere with any network in use around it. `[u
 > inversion is ever turned back on. From reset until `app_main` configures it,
 > that pin is a floating input and the bus level is undefined, so without this
 > every simulator reboot may present the bus with a break condition or noise.
+
+> **Why polarity is runtime as well as build-time.** FR-LNK-02 was settled by
+> flipping `SIM_TX_INVERT` and reflashing — which meant the firmware image was
+> part of the experiment measuring it, the thing §14's first constraint exists to
+> prevent. FR-LNK-06 makes the same test one console command, so a bench run can
+> try both polarities against one binary and say which one it used. The Kconfig
+> option survives as the boot default, because a rig permanently wired to an
+> inverting driver should come up correct without anyone typing anything.
+>
+> Flipping the polarity flips the idle level, so the line makes **one
+> transition** at the moment of the change. That is unavoidable and harmless
+> between telegrams — but it is why FR-LNK-06 requires the change to be taken
+> under the transmit lock: applied mid-telegram it would invert the tail of a
+> frame and nothing else, a corruption no fault directive describes. `[derived]`
 
 > **How FR-LNK-02 was settled.** It was originally written the other way round,
 > from a description of the driver stage as inverting, and never measured. The
@@ -616,6 +631,9 @@ broker and no IP, and it cannot interfere with any network in use around it. `[u
 | ID | Precondition · stimulus | Expected | **Prohibited** | Tier |
 |---|---|---|---|---|
 | FR-LNK-01/02 | `tx 10` (FR-CLI-07), captured at 2400 8E1 | Every byte captured is `0x55` | `0xD5` (one inversion out); varying bytes (wrong rate); no bytes | bench |
+| FR-LNK-06 | `mode 1`; `invert on`; capture; `invert off`; capture | The two captures are bitwise complements of each other | A polarity change that needs a reflash | bench |
+| FR-LNK-06 | `invert on` issued mid-telegram | The telegram in flight completes at the old polarity | A frame whose tail is inverted | bench |
+| FR-LNK-06 | `invert on`, then `status` and the next emission line | Both report `invert=1` | A polarity applied but unreported | bench |
 | FR-LNK-01/02 | Capture one telegram with a logic analyser at the driver input | Byte stream identical to the host test's output; 2400 8E1 decode clean | Any parity or framing error | target |
 | FR-LNK-04 | Idle simulator; DVM on the bus | 24 V | 12 V (continuous space) | target |
 | FR-LNK-05 | Scope the bus across a simulator reset, 20 resets | Bus at 24 V within 10 ms, no spurious edges | Any spurious start bit at boot | target |
