@@ -356,7 +356,8 @@ void emit(e450::Mode mode, const e450::EmissionConfig &cfg, const e450::FaultSpe
     const int32_t silence = e450::silence_ms(payload.wire.size(), period_ms);
     ESP_LOGI(TAG,
              "emit n=%" PRIu32 " mode=%s fault=%s bytes=%u frames=%u pre=%" PRIu32
-             "/0x%02X wire_ms=%" PRIu32 " tx_ms=%lld lead_us=%s silent_ms=%" PRId32 " gpio=%d %s",
+             "/0x%02X wire_ms=%" PRIu32 " tx_ms=%lld lead_us=%s silent_ms=%" PRId32
+             " gpio=%d inv=%d %s",
              payload.id, mode_name(mode), payload.fault,
              static_cast<unsigned>(payload.wire.size()), static_cast<unsigned>(payload.frames),
              cfg.preamble_bytes, unsigned(cfg.preamble_byte),
