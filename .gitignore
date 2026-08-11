@@ -3,3 +3,7 @@ build/
 
 # Scratch files, never part of a build or a deliverable.
 tmp/
+
+# Project skills come from the Embedded-AI-Harness bind mount
+# (/home/dev/.harness-skills). The link is host-specific -- do not commit it.
+.claude/skills/
